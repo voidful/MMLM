@@ -1,0 +1,6 @@
+trl
+fastchat
+transformers
+peft
+bitsandbytes
+accelerate
