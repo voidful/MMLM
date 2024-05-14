@@ -11,16 +11,16 @@ import torch.nn.functional as F
 
 class MMLM(nn.Module):
     def __init__(
-        self,
-        lm_config,
-        lm_model=None,
-        lm_tokenizer=None,
-        audio_config=1,
-        audio_model=None,
-        audio_adapter_config=None,
-        visual_config=1,
-        visual_model=None,
-        visual_adapter_config=None,
+            self,
+            lm_config,
+            lm_model=None,
+            lm_tokenizer=None,
+            audio_config=1,
+            audio_model=None,
+            audio_adapter_config=None,
+            visual_config=1,
+            visual_model=None,
+            visual_adapter_config=None,
     ):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -57,8 +57,20 @@ class MMLM(nn.Module):
                 visual_config, visual_model, visual_adapter_config, "visual"
             )
 
+        base_audio_tag_id = self.tokenizer.encode(f"CAUDIO_TAG_{0}")[0]
+        self.continue_audio_feature_type_ids = [base_audio_tag_id, base_audio_tag_id + 100]
+
+        base_continue_visual_tag_id = self.tokenizer.encode(f"CVISUAL_TAG_{0}")[0]
+        self.continue_visual_feature_type_ids = [base_continue_visual_tag_id, base_continue_visual_tag_id + 100]
+
+        base_discrete_audio_tag_id = self.tokenizer.encode(f"a_tok_{0}")[0]
+        self.discrete_audio_feature_type_ids = [base_discrete_audio_tag_id, base_discrete_audio_tag_id + 1024 * 10]
+
+        base_discrete_visual_tag_id = self.tokenizer.encode(f"v_tok_{0}")[0]
+        self.discrete_visual_feature_type_ids = [base_discrete_visual_tag_id, base_discrete_visual_tag_id + 1024 * 10]
+
     def _setup_discrete_feature_weights(self, config, modality):
-        learnable_weight_init = torch.arange(config, 0, step=-1).float().view(config, 1)
+        learnable_weight_init = torch.arange(config, 0, step=-1).float().view(config, 1, 1)
         setattr(self, f"{modality}_learnable_weight", nn.Parameter(learnable_weight_init))
 
     def _setup_continuous_feature_processing(self, config, model, adapter_config, modality):
@@ -71,22 +83,6 @@ class MMLM(nn.Module):
                 input_size=model.config.hidden_size, output_size=self.lm_model.config.hidden_size
             ).to(self.device),
         )
-
-    def continue_audio_feature_type_ids(self):
-        base_tag_id = self.tokenizer.encode(f"CAUDIO_TAG_{0}")[0]
-        return [base_tag_id + u for u in range(100)]
-
-    def continue_visual_feature_type_ids(self):
-        base_tag_id = self.tokenizer.encode(f"CVISUAL_TAG_{0}")[0]
-        return [base_tag_id + u for u in range(100)]
-
-    def discrete_audio_feature_type_ids(self):
-        base_tag_id = self.tokenizer.encode(f"a_tok_{0}")[0]
-        return [base_tag_id + u for u in range(1024 * 10)]
-
-    def discrete_visual_feature_type_ids(self):
-        base_tag_id = self.tokenizer.encode(f"v_tok_{0}")[0]
-        return [base_tag_id + u for u in range(1024 * 10)]
 
     def forward(
             self,
@@ -119,12 +115,12 @@ class MMLM(nn.Module):
                 text_ids = []
                 input_embeds = []
                 for i in batch_input:
-                    if i in self.discrete_audio_feature_type_ids():
+                    if self.discrete_audio_feature_type_ids[0] < i < self.discrete_audio_feature_type_ids[1]:
                         audio_discrete_token.append(i)
                         if text_ids:
                             input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
                         text_ids = []
-                    elif i in self.discrete_visual_feature_type_ids():
+                    elif self.discrete_visual_feature_type_ids[0] < i < self.discrete_visual_feature_type_ids[1]:
                         visual_discrete_token.append(i)
                         if text_ids:
                             input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
@@ -132,6 +128,8 @@ class MMLM(nn.Module):
                     else:
                         text_ids.append(i)
                         if len(audio_discrete_token) > 0:
+                            audio_discrete_token = audio_discrete_token[
+                                                   :len(audio_discrete_token) // self.audio_config * self.audio_config]
                             discrete_audio_input_id = torch.tensor(audio_discrete_token).view(self.audio_config, -1)
                             discrete_audio_input_ids = []
                             for i in range(self.audio_config):
@@ -157,6 +155,8 @@ class MMLM(nn.Module):
                             if discrete_visual_input_ids:
                                 input_embeds.append(weighted_discrete_inputs_embeds)
                             visual_discrete_token = []
+                if text_ids:
+                    input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
                 inputs_embeds.append(torch.cat(input_embeds))
             inputs_embeds = torch.stack(inputs_embeds)
             outputs = self.lm_model(
@@ -180,13 +180,13 @@ class MMLM(nn.Module):
                 vision_features_id = 0
                 audio_features_id = 0
                 for pos, ids in enumerate(batch_input):
-                    if ids in self.continue_audio_feature_type_ids():
+                    if self.continue_audio_feature_type_ids[0] < ids < self.continue_audio_feature_type_ids[1]:
                         audio_feature = self.audio_adapter(audio_features[batch_num][audio_features_id]).to(self.device)
                         audio_features_id += 1
                         inputs_embeds = torch.cat(
                             (inputs_embeds[:, :pos, :], audio_feature, inputs_embeds[:, pos + 1:, :]), dim=1).to(
                             self.device)
-                    if ids in self.continue_visual_feature_type_ids():
+                    if self.continue_visual_feature_type_ids[0] < ids < self.continue_visual_feature_type_ids[1]:
                         vision_features = self.visual_adapter(vision_features[batch_num][vision_features_id])
                         vision_features_id += 1
                         inputs_embeds = torch.cat(
@@ -205,14 +205,18 @@ class MMLM(nn.Module):
         loss = None
         if labels is not None:
             # Shift so that tokens < n predict n
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
+            shift_logits = logits[..., :, :].contiguous()
+            shift_labels = labels[..., :].contiguous()
             # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_logits = shift_logits.view(-1, self.lm_model.config.vocab_size)
             shift_labels = shift_labels.view(-1)
+
             # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
+            padding_size = shift_logits.size(0) - shift_labels.size(0)
+            padding_tensor = torch.full((padding_size,), -100).to(shift_labels.device)
+            shift_labels = torch.cat([padding_tensor, shift_labels])
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
@@ -227,8 +231,8 @@ class MMLM(nn.Module):
 
     def generate(self, input_ids, audio_feature=None, max_length=50):
         self.eval()
-        device = next(self.parameters()).device
         generated = input_ids.to(self.device)
+        begin_gen_pos = input_ids.shape[1]
         with torch.no_grad():
             for _ in range(max_length):
                 outputs = self.forward(input_ids=generated, audio_features=audio_feature)
@@ -238,4 +242,4 @@ class MMLM(nn.Module):
                 generated = torch.cat((generated, next_token), dim=-1)
                 if next_token.item() == self.tokenizer.eos_token_id:
                     break
-        return generated
+        return generated[:, begin_gen_pos:-1]
