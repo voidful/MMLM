@@ -1,52 +1,42 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer
 from mmlm.model import MMLM
+from mmlm.utility import MMLMUtility
 from datasets import load_dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments, AutoModel
 
-lm_model = AutoModelForCausalLM.from_pretrained('voidful/pythia-160m')
-lm_tokenizer = AutoTokenizer.from_pretrained('voidful/pythia-160m')
-# audio_model =  AutoModel.from_pretrained('ntu-spml/distilhubert')
-ds = load_dataset("distil-whisper/librispeech_asr_dummy", split='validation')
-dataset = load_dataset("Codec-SUPERB/librispeech_asr_dummy_extract_unit")
+lm_model = AutoModelForCausalLM.from_pretrained('voidful/phi-1_5_chat_128k')
+lm_tokenizer = AutoTokenizer.from_pretrained('voidful/phi-1_5_chat_128k')
+audio_model = AutoModel.from_pretrained('ntu-spml/distilhubert')
 
-# merge two dataset
-codec_layer = 8
-input_datas = []
-d = dataset['speech_tokenizer_16k']
-for b in range(len(d)):
-    encodec_input = ""
-    for i in range(codec_layer):
-        encodec_input = "".join([f"a_tok_{u + i * 1024}" for u in d[b]['unit'][i]])
-    input_datas.append([encodec_input, ds[b]['text']])
+mmlm = MMLM('voidful/phi-1_5_chat_128k', lm_model=lm_model, lm_tokenizer=lm_tokenizer, audio_config=8)
+mmlu = MMLMUtility(mmlm)
 
-# init model
-mmlm = MMLM('voidful/pythia-160m',lm_model=lm_model,lm_tokenizer=lm_tokenizer,audio_config=8)
+dataset = load_dataset("voidful/cv_13_tw_speech_tokenizer")
 
-# prediction before training
-test_input_text = "transcribe the audio:"+input_datas[9][0]+"\nTranscription:"
-test_input_ids = mmlm.tokenizer(test_input_text, return_tensors="pt").input_ids
-outputs = mmlm.generate(test_input_ids, max_length=100)
-print(mmlm.tokenizer.batch_decode(outputs))
+tokenized_datasets = dataset.map(mmlu.tokenize_function, batched=False)
 
-# training loss
-input_text = "transcribe the audio:"+input_datas[9][0]+"\nTranscription:"+input_datas[9][1]
-target_text = input_datas[9][1] + mmlm.tokenizer.eos_token
-input_ids = mmlm.tokenizer(input_text, return_tensors="pt").input_ids
-target_ids = mmlm.tokenizer(target_text, return_tensors="pt").input_ids
-loss = mmlm.forward(input_ids,labels=target_ids).loss
-print(loss)
+dc = mmlu.MMLMDataCollator(mmlm.tokenizer)
 
-# training loop
-import torch.optim as optim
-for _ in range(100):
-    optimizer = optim.Adam(mmlm.parameters(), lr=0.0001)
-    loss = mmlm.forward(input_ids,labels=target_ids).loss
-    loss.backward()
-    optimizer.step()
-    optimizer.zero_grad()
-    print(loss)
+mmlm.tokenizer.pad_token = mmlm.tokenizer.eos_token
+training_args = TrainingArguments(
+    output_dir='./results',
+    evaluation_strategy="epoch",
+    learning_rate=2e-5,
+    per_device_train_batch_size=3,
+    per_device_eval_batch_size=3,
+    logging_steps=1,
+    num_train_epochs=5,
+    weight_decay=0.01,
+    logging_dir='./logs',
+)
 
-# prediction after training
-test_input_text = "transcribe the audio:"+input_datas[9][0]+"\nTranscription:"
-test_input_ids = mmlm.tokenizer(test_input_text, return_tensors="pt").input_ids
-outputs = mmlm.generate(test_input_ids, max_length=100)
-print(mmlm.tokenizer.batch_decode(outputs))
+# Initialize the Trainer
+trainer = Trainer(
+    model=mmlm,
+    args=training_args,
+    train_dataset=tokenized_datasets['train'],
+    eval_dataset=tokenized_datasets['test'],
+    tokenizer=lm_tokenizer,
+    data_collator=dc
+)
+
+trainer.train()

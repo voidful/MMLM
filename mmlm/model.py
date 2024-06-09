@@ -36,6 +36,7 @@ class MMLM(nn.Module):
             if lm_tokenizer
             else AutoTokenizer.from_pretrained(lm_config)
         )
+        self.tokenizer.pad_token = self.tokenizer.eos_token
 
         # Modality Configurations
         self.audio_config = audio_config
@@ -130,7 +131,8 @@ class MMLM(nn.Module):
                         if len(audio_discrete_token) > 0:
                             audio_discrete_token = audio_discrete_token[
                                                    :len(audio_discrete_token) // self.audio_config * self.audio_config]
-                            discrete_audio_input_id = torch.tensor(audio_discrete_token).view(self.audio_config, -1)
+                            discrete_audio_input_id = torch.tensor(audio_discrete_token, dtype=torch.long).view(
+                                self.audio_config, -1)
                             discrete_audio_input_ids = []
                             for i in range(self.audio_config):
                                 input_scale = embeder(discrete_audio_input_id[i, :].to(self.device))
@@ -158,7 +160,11 @@ class MMLM(nn.Module):
                 if text_ids:
                     input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
                 inputs_embeds.append(torch.cat(input_embeds))
-            inputs_embeds = torch.stack(inputs_embeds)
+            max_length = max(tensor.size(0) for tensor in inputs_embeds)
+            inputs_embeds = torch.stack([
+                F.pad(tensor, (0, 0, max_length - tensor.size(0), 0), "constant", 0)
+                for tensor in inputs_embeds
+            ])
             outputs = self.lm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -204,19 +210,10 @@ class MMLM(nn.Module):
 
         loss = None
         if labels is not None:
-            # Shift so that tokens < n predict n
-            shift_logits = logits[..., :, :].contiguous()
-            shift_labels = labels[..., :].contiguous()
-            # Flatten the tokens
             loss_fct = CrossEntropyLoss()
-            shift_logits = shift_logits.view(-1, self.lm_model.config.vocab_size)
-            shift_labels = shift_labels.view(-1)
-
-            # Enable model parallelism
-            shift_labels = shift_labels.to(shift_logits.device)
-            padding_size = shift_logits.size(0) - shift_labels.size(0)
-            padding_tensor = torch.full((padding_size,), -100).to(shift_labels.device)
-            shift_labels = torch.cat([padding_tensor, shift_labels])
+            labels = labels[:, -logits.shape[1]:]
+            shift_logits = logits.reshape(-1, logits.size(-1))
+            shift_labels = labels.reshape(-1)
             loss = loss_fct(shift_logits, shift_labels)
 
         if not return_dict:
