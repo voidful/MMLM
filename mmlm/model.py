@@ -11,16 +11,16 @@ import torch.nn.functional as F
 
 class MMLM(nn.Module):
     def __init__(
-            self,
-            lm_config,
-            lm_model=None,
-            lm_tokenizer=None,
-            audio_config=1,
-            audio_model=None,
-            audio_adapter_config=None,
-            visual_config=1,
-            visual_model=None,
-            visual_adapter_config=None,
+        self,
+        lm_config,
+        lm_model=None,
+        lm_tokenizer=None,
+        audio_config=1,
+        audio_model=None,
+        audio_adapter_config=None,
+        visual_config=1,
+        visual_model=None,
+        visual_adapter_config=None,
     ):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -86,18 +86,18 @@ class MMLM(nn.Module):
         )
 
     def forward(
-            self,
-            input_ids: torch.LongTensor = None,
-            audio_features=None,
-            vision_features=None,
-            attention_mask: Optional[torch.Tensor] = None,
-            position_ids: Optional[torch.LongTensor] = None,
-            inputs_embeds: Optional[torch.FloatTensor] = None,
-            labels: Optional[torch.LongTensor] = None,
-            use_cache: Optional[bool] = None,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-            return_dict: Optional[bool] = None,
+        self,
+        input_ids: torch.LongTensor = None,
+        audio_features=None,
+        vision_features=None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
 
         output_attentions = output_attentions if output_attentions is not None else self.lm_model.config.output_attentions
@@ -105,7 +105,6 @@ class MMLM(nn.Module):
             output_hidden_states if output_hidden_states is not None else self.lm_model.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.lm_model.config.use_return_dict
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
 
         if inputs_embeds is None:
             embeder = self.lm_model.get_input_embeddings()
@@ -130,16 +129,19 @@ class MMLM(nn.Module):
                         text_ids.append(i)
                         if len(audio_discrete_token) > 0:
                             audio_discrete_token = audio_discrete_token[
-                                                   :len(audio_discrete_token) // self.audio_config * self.audio_config]
+                                :len(audio_discrete_token) // self.audio_config * self.audio_config
+                            ]
                             discrete_audio_input_id = torch.tensor(audio_discrete_token, dtype=torch.long).view(
-                                self.audio_config, -1)
+                                self.audio_config, -1
+                            )
                             discrete_audio_input_ids = []
                             for i in range(self.audio_config):
                                 input_scale = embeder(discrete_audio_input_id[i, :].to(self.device))
                                 discrete_audio_input_ids.append(input_scale)
                             weighted_discrete_inputs_embeds = torch.mul(
                                 torch.stack(discrete_audio_input_ids, dim=0).to(self.device),
-                                F.softmax(self.audio_learnable_weight, dim=0).to(self.device))
+                                F.softmax(self.audio_learnable_weight, dim=0).to(self.device)
+                            )
                             weighted_discrete_inputs_embeds = torch.sum(weighted_discrete_inputs_embeds, dim=0)
                             if discrete_audio_input_ids:
                                 input_embeds.append(weighted_discrete_inputs_embeds)
@@ -152,7 +154,8 @@ class MMLM(nn.Module):
                                 discrete_visual_input_ids.append(input_scale)
                             weighted_discrete_inputs_embeds = torch.mul(
                                 torch.stack(discrete_visual_input_ids, dim=0).to(self.device),
-                                F.softmax(self.visual_learnable_weight, dim=0).to(self.device))
+                                F.softmax(self.visual_learnable_weight, dim=0).to(self.device)
+                            )
                             weighted_discrete_inputs_embeds = torch.sum(weighted_discrete_inputs_embeds, dim=0)
                             if discrete_visual_input_ids:
                                 input_embeds.append(weighted_discrete_inputs_embeds)
@@ -181,7 +184,7 @@ class MMLM(nn.Module):
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-        elif self.audio_config or self.visual_config:  # repack input_embeds
+        elif self.audio_config or self.visual_config:
             for batch_num, batch_input in enumerate(input_ids):
                 vision_features_id = 0
                 audio_features_id = 0
@@ -190,13 +193,14 @@ class MMLM(nn.Module):
                         audio_feature = self.audio_adapter(audio_features[batch_num][audio_features_id]).to(self.device)
                         audio_features_id += 1
                         inputs_embeds = torch.cat(
-                            (inputs_embeds[:, :pos, :], audio_feature, inputs_embeds[:, pos + 1:, :]), dim=1).to(
-                            self.device)
+                            (inputs_embeds[:, :pos, :], audio_feature, inputs_embeds[:, pos + 1:, :]), dim=1
+                        ).to(self.device)
                     if self.continue_visual_feature_type_ids[0] < ids < self.continue_visual_feature_type_ids[1]:
                         vision_features = self.visual_adapter(vision_features[batch_num][vision_features_id])
                         vision_features_id += 1
                         inputs_embeds = torch.cat(
-                            (inputs_embeds[:, :pos, :], vision_features, inputs_embeds[:, pos + 1:, :]), dim=1)
+                            (inputs_embeds[:, :pos, :], vision_features, inputs_embeds[:, pos + 1:, :]), dim=1
+                        )
             outputs = self.lm_model(
                 inputs_embeds=inputs_embeds,
                 attention_mask=attention_mask,
@@ -234,7 +238,6 @@ class MMLM(nn.Module):
             for _ in range(max_length):
                 outputs = self.forward(input_ids=generated, audio_features=audio_feature)
                 next_token_logits = outputs.logits[:, -1, :]
-                next_token_logits = next_token_logits
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                 generated = torch.cat((generated, next_token), dim=-1)
                 if next_token.item() == self.tokenizer.eos_token_id:
