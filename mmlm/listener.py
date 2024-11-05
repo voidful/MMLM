@@ -11,8 +11,8 @@ class ListenFeatureExtractor(nn.Module):
     def __init__(self, model_id="openai/whisper-large-v3-turbo",
                  sampling_rate=16000,
                  queue_duration=30,
-                 step_duration=0.080):
-        super(FeatureExtractor, self).__init__()
+                 step_duration=0.12):
+        super(ListenFeatureExtractor, self).__init__()
         model_id = "openai/whisper-large-v3-turbo"
         self.torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -49,4 +49,4 @@ class ListenFeatureExtractor(nn.Module):
                 encoder_output_stack = torch.stack(sliced_encoder_outputs, dim=0)
             weighted_sum = torch.sum(self.layer_weights[:, None, None, None] * encoder_output_stack, dim=0)
             feature_list.append(weighted_sum)
-        return torch.cat(feature_list, dim=1)
+        return torch.cat(feature_list, dim=1).permute(0,2,1)
