@@ -45,7 +45,7 @@ class ListenFeatureExtractor(nn.Module):
                                   -self.num_layers:]  # Exclude input embedding layer
                 sliced_encoder_outputs = []
                 for encoder_output in encoder_outputs:
-                    sliced_encoder_outputs.append(torch.mean(encoder_output[:, feature_pos:feature_pos + 4]))
+                    sliced_encoder_outputs.append(torch.mean(encoder_output[:, feature_pos:feature_pos + 6]))
                 encoder_output_stack = torch.stack(sliced_encoder_outputs, dim=0)
             weighted_sum = torch.sum(self.layer_weights[:, None, None, None] * encoder_output_stack, dim=0)
             feature_list.append(weighted_sum)
