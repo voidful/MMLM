@@ -1,26 +1,24 @@
+import librosa
+import numpy as np
 import torch
-from torch.nn.utils.rnn import pad_sequence
 
 
-class MMLMUtility():
-    def __init__(self, mmlm_model):
-        self.mmlm_model = mmlm_model
+def load_audio_to_tensor(audio_input):
+    # Check if audio_input is a file path, numpy array, or list and convert accordingly
+    if isinstance(audio_input, str):  # If input is a file path
+        audio_array, _ = librosa.load(audio_input, sr=None)  # Preserve original sampling rate
+        audio_array = torch.tensor(audio_array).float()
+    elif isinstance(audio_input, np.ndarray):
+        audio_array = torch.from_numpy(audio_input)
+    elif isinstance(audio_input, list):
+        audio_array = torch.tensor(audio_input)
+    else:
+        raise ValueError("Unsupported audio input type")
 
-    def tokenize_function(self, examples):
-        model_inputs = self.mmlm_model.tokenizer(examples['input'] + examples['label'])
-        labels = self.mmlm_model.tokenizer(examples['label'] + self.mmlm_model.tokenizer.eos_token)
-        padding_size = len(model_inputs['input_ids']) - len(labels["input_ids"])
-        model_inputs["label_ids"] = [-100] * padding_size + labels["input_ids"]
-        return model_inputs
+    # Check the dimensions and adjust if necessary
+    if audio_array.dim() == 1:  # Shape is [wav_length]
+        audio_array = audio_array.unsqueeze(0).unsqueeze(0)  # Expand to [1, 1, wav_length]
+    elif audio_array.dim() == 2:  # Shape is [channel, wav_length]
+        audio_array = audio_array.unsqueeze(0)  # Expand to [1, channel, wav_length]
 
-    class MMLMDataCollator:
-        def __init__(self, tokenizer):
-            self.tokenizer = tokenizer
-
-        def __call__(self, features):
-            return {
-                'input_ids': pad_sequence([torch.tensor(i['input_ids']) for i in features], batch_first=True,
-                                          padding_value=self.tokenizer.eos_token_id),
-                'labels': pad_sequence([torch.tensor(i['label_ids']) for i in features], batch_first=True,
-                                       padding_value=-100),
-            }
+    return audio_array

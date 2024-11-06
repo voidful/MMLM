@@ -1,11 +1,9 @@
-import moshi
-import librosa
 import torch
-import soundfile as sf
 from huggingface_hub import hf_hub_download
 from moshi.models import loaders
 import torch.nn as nn
-import numpy as np
+
+from mmlm.utility import load_audio_to_tensor
 
 
 class SynthFeatureExtractor(nn.Module):
@@ -17,20 +15,8 @@ class SynthFeatureExtractor(nn.Module):
         mimi.set_num_codebooks(num_codebooks)
         self.mimi = mimi
 
-    def forward(self, audio_array):
-        # Convert input to a tensor if it's a numpy array or list
-        if isinstance(audio_array, np.ndarray):
-            audio_array = torch.from_numpy(audio_array).to(self.device)
-        elif isinstance(audio_array, list):
-            audio_array = torch.tensor(audio_array).to(self.device)
-
-        # Check the dimensions and adjust if necessary
-        if audio_array.dim() == 1:  # Shape is [wav_length]
-            audio_array = audio_array.unsqueeze(0).unsqueeze(0)  # Expand to [1, 1, wav_length]
-
-        elif audio_array.dim() == 2:  # Shape is [channel, wav_length]
-            audio_array = audio_array.unsqueeze(0)  # Expand to [1, channel, wav_length]
-
+    def forward(self, audio_input):
+        audio_array = load_audio_to_tensor(audio_input).to(self.device)
         with torch.no_grad():
             codes = self.mimi.encode(audio_array)
             return codes.cpu()
