@@ -11,7 +11,7 @@ class TextAligner(nn.Module):
         self.feature_extraction_interval = feature_extraction_interval
 
     def insert_end_pads(self, aligned_features):
-        """Insert 'end_pad' markers after sequences of 'pad' tokens where needed."""
+        """Insert 'end_pad' markers between words and pad sequences where needed, except after the last word."""
         i = 0
         while i < len(aligned_features):
             if aligned_features[i] == '[PAD]':
@@ -22,15 +22,13 @@ class TextAligner(nn.Module):
                 # Assign 'end_pad' if a word follows the current pad sequence
                 if j + 1 < len(aligned_features) and aligned_features[j + 1] not in ['[PAD]', '[END_PAD]']:
                     aligned_features[j] = '[END_PAD]'
-                else:
-                    # Handle pads after the last word in the sequence
-                    if i - 1 >= 0 and aligned_features[i - 1] not in ['[PAD]', '[END_PAD]']:
-                        aligned_features[i] = '[PAD]'
-                        if i + 1 <= j:
-                            aligned_features[i + 1] = '[END_PAD]'
-                        else:
-                            aligned_features[i] = '[END_PAD]'
+                elif j + 1 < len(aligned_features) and aligned_features[j + 1] == '[PAD]':
+                    aligned_features[j] = '[PAD]'
                 i = j + 1
+            elif i + 1 < len(aligned_features) and aligned_features[i + 1] not in ['[PAD]', '[END_PAD]']:
+                # Add end pad between words, except for the last word
+                aligned_features[i] += ' [END_PAD]'
+                i += 1
             else:
                 i += 1
 
