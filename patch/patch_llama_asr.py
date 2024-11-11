@@ -1,4 +1,3 @@
-import nlp2
 import torch
 import copy
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -25,12 +24,16 @@ state_dict_weight_clone = pretrained.get_input_embeddings().state_dict()['weight
 pretrained.resize_token_embeddings(len(whisper_dict))
 input_embedding = pretrained.get_input_embeddings()
 state_dict_weight = input_embedding.state_dict()['weight']
-for i in intersection:
-    state_dict_weight[whisper_dict[i]] = state_dict_weight_clone[llama_dict[i]]
+for i in intersection:    state_dict_weight[whisper_dict[i]] = state_dict_weight_clone[llama_dict[i]]
 pretrained.set_input_embeddings(input_embedding)
 
 # check if the new embedding layer is correctly set
 assert torch.equal(pretrained.get_input_embeddings().state_dict()['weight'], state_dict_weight)
+
+add_tokens = (["[PAD]", "[END_PAD]"]+
+                tokenizer.all_special_tokens)
+num_added_toks = processor.tokenizer.add_tokens(add_tokens)
+pretrained.resize_token_embeddings(len(processor.tokenizer))
 
 processor.tokenizer.push_to_hub("voidful/Llama-3.2-11B-ASR")
 pretrained.push_to_hub("voidful/Llama-3.2-11B-ASR")
