@@ -45,7 +45,8 @@ class TextAligner(nn.Module):
 
     def forward(self, audio_path):
         segments, _ = self.model.transcribe(audio_path, word_timestamps=True)
-        audio_duration = librosa.get_duration(path=audio_path)
+        wav_data, sample_rate = librosa.load(audio_path, sr=24_000)
+        audio_duration = len(wav_data) / sample_rate
         num_features = math.ceil(audio_duration / self.feature_extraction_interval)
         aligned_features = ['[PAD]'] * num_features
 
