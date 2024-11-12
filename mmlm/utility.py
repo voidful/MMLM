@@ -7,7 +7,7 @@ from torch.nn.utils.rnn import pad_sequence
 def load_audio_to_tensor(audio_input, sr=None):
     def resample_if_needed(audio, orig_sr, target_sr):
         """Resample the audio only if the original and target sampling rates differ."""
-        return librosa.resample(audio, orig_sr, target_sr) if orig_sr != target_sr else audio
+        return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr) if orig_sr != target_sr else audio
 
     # Load from file path with optional resampling
     if isinstance(audio_input, str):

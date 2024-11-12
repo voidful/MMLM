@@ -12,7 +12,7 @@ class ListenFeatureExtractor(nn.Module):
                  sampling_rate=16000,
                  encode_feature_size=1500,  # Fixed length of 30s whisper feature
                  queue_duration=30,
-                 step_duration=0.12):
+                 step_duration=0.08):
         super(ListenFeatureExtractor, self).__init__()
         self.torch_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -69,7 +69,7 @@ class ListenFeatureExtractor(nn.Module):
                     sliced_encoder_outputs = []
                     for encoder_output in encoder_outputs:
                         sliced_mean = torch.mean(
-                            encoder_output[:, feature_pos:feature_pos + 6, :])  # Mean over sequence length
+                            encoder_output[:, feature_pos:feature_pos + 4, :])  # Mean over sequence length
                         sliced_encoder_outputs.append(sliced_mean)
                     encoder_output_stack = torch.stack(sliced_encoder_outputs, dim=0)
 

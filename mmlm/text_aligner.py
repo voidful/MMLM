@@ -5,7 +5,7 @@ from faster_whisper import WhisperModel
 
 
 class TextAligner(nn.Module):
-    def __init__(self, model_config="deepdml/faster-whisper-large-v3-turbo-ct2", feature_extraction_interval=0.12):
+    def __init__(self, model_config="deepdml/faster-whisper-large-v3-turbo-ct2", feature_extraction_interval=0.08):
         super(TextAligner, self).__init__()
         self.model = WhisperModel(model_config)
         self.feature_extraction_interval = feature_extraction_interval
