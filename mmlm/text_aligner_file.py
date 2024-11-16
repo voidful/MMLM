@@ -17,7 +17,6 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 
-
 class TextAligner:
     def __init__(self, model_config="deepdml/faster-whisper-large-v3-turbo-ct2",
                  feature_extraction_interval=0.08,
@@ -50,15 +49,26 @@ class TextAligner:
             logging.warning(f"Failed to read word CSV {word_csv_path}: {e}")
             return None, None
 
+        # Validate columns
         start_col = next((col for col in ['start', 'start_time'] if col in word_df.columns), None)
         word_col = next((col for col in ['word', 'text'] if col in word_df.columns), None)
 
         if not start_col or not word_col:
-            logging.warning(f"Word CSV {word_csv_path} missing required columns.")
+            logging.warning(f"Word CSV {word_csv_path} does not contain required columns ('start' or 'word').")
             return None, None
 
-        word_df[start_col] = word_df[start_col].astype(str).str.replace('s', '').astype(float)
-        start_sec = word_df[start_col].iloc[0]
+        # Check if the DataFrame is empty
+        if word_df.empty:
+            logging.warning(f"The word CSV {word_csv_path} is empty.")
+            return None, None
+
+        try:
+            # Clean up and process the 'start' column
+            word_df[start_col] = word_df[start_col].astype(str).str.replace('s', '').astype(float)
+            start_sec = word_df[start_col].iloc[0]  # This should now be safe
+        except Exception as e:
+            logging.warning(f"Failed to process 'start' column in {word_csv_path}: {e}")
+            return None, None
 
         raw_text = ""
         for _, row in word_df.iterrows():
@@ -160,8 +170,7 @@ def main():
     parser.add_argument("--segment_dir", type=str, required=True, help="Directory containing segment CSV files.")
     parser.add_argument("--wav_dir", type=str, required=True, help="Directory containing audio files.")
     parser.add_argument("--output_path", type=str, required=True, help="Output JSONL file path.")
-    parser.add_argument("--model_config", type=str, default="deepdml/faster-whisper-large-v3-turbo-ct2",
-                        help="Model configuration.")
+    parser.add_argument("--model_config", type=str, default="deepdml/faster-whisper-large-v3-turbo-ct2", help="Model configuration.")
 
     args = parser.parse_args()
     process_file(args)
