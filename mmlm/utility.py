@@ -31,14 +31,32 @@ class MMLMUtility():
             }
 
 
-def load_audio_to_tensor(audio_input, sr=None):
+import librosa
+import numpy as np
+import torch
+from torch.nn.utils.rnn import pad_sequence
+
+
+def load_audio_to_tensor(audio_input, sr=24000, selected_channel=None):
+    """
+    Load audio input into a PyTorch tensor with optional resampling and channel selection.
+
+    Parameters:
+    - audio_input: str, np.ndarray, list, or torch.Tensor representing audio data or path to an audio file.
+    - sr: int, the target sampling rate for resampling (default: 24000).
+    - selected_channel: int, the index of the channel to select (default: None, meaning no channel selection).
+
+    Returns:
+    - A PyTorch tensor of shape (B, C, T) where B is batch size, C is number of channels, and T is time frames.
+    """
+
     def resample_if_needed(audio, orig_sr, target_sr):
         """Resample the audio only if the original and target sampling rates differ."""
         return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr) if orig_sr != target_sr else audio
 
-    # Load from file path with optional resampling
+    # Load from file path
     if isinstance(audio_input, str):
-        audio_array, orig_sr = librosa.load(audio_input, sr=None)
+        audio_array, orig_sr = librosa.load(audio_input, sr=None, mono=False)
         if sr is not None:
             audio_array = resample_if_needed(audio_array, orig_sr, sr)
         audio_array = torch.tensor(audio_array).float()
@@ -72,14 +90,26 @@ def load_audio_to_tensor(audio_input, sr=None):
     else:
         raise ValueError("Unsupported audio input type")
 
-    # Dimension adjustment
-    if audio_array.dim() == 1:
-        audio_array = audio_array.unsqueeze(0).unsqueeze(0)
-    elif audio_array.dim() == 2:
-        audio_array = audio_array.unsqueeze(1)
-    elif audio_array.dim() == 3:
-        pass  # No adjustment needed for 3D
-    else:
-        raise ValueError("Audio input has unsupported dimensions after processing")
+    # Channel selection
+    if audio_array.dim() == 2:  # (Channels, T)
+        if selected_channel is not None:
+            if selected_channel >= audio_array.shape[0]:
+                raise ValueError(
+                    f"Selected channel {selected_channel} is out of range for audio with {audio_array.shape[0]} channels.")
+            audio_array = audio_array[selected_channel:selected_channel + 1]  # Select specific channel
+    elif audio_array.dim() == 3:  # (Batch, Channels, T)
+        if selected_channel is not None:
+            if selected_channel >= audio_array.shape[1]:
+                raise ValueError(
+                    f"Selected channel {selected_channel} is out of range for audio with {audio_array.shape[1]} channels.")
+            audio_array = audio_array[:, selected_channel:selected_channel + 1, :]  # Select specific channel
+
+    # Dimension adjustment to (B, C, T)
+    if audio_array.dim() == 1:  # (T)
+        audio_array = audio_array.unsqueeze(0).unsqueeze(0)  # (B=1, C=1, T)
+    elif audio_array.dim() == 2:  # (C, T) or (T, C)
+        audio_array = audio_array.unsqueeze(0)  # (B=1, C, T)
+    elif audio_array.dim() > 3:
+        raise ValueError("Audio input has unsupported dimensions after processing.")
 
     return audio_array
