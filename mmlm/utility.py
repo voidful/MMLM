@@ -1,8 +1,5 @@
-import librosa
+from pydub import AudioSegment
 import numpy as np
-import torch
-from torch.nn.utils.rnn import pad_sequence
-
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -31,18 +28,12 @@ class MMLMUtility():
             }
 
 
-import librosa
-import numpy as np
-import torch
-from torch.nn.utils.rnn import pad_sequence
-
-
 def load_audio_to_tensor(audio_input, sr=24000, selected_channel=None):
     """
     Load audio input into a PyTorch tensor with optional resampling and channel selection.
 
     Parameters:
-    - audio_input: str, np.ndarray, list, or torch.Tensor representing audio data or path to an audio file.
+    - audio_input: str or torch.Tensor, representing audio data or path to an audio file.
     - sr: int, the target sampling rate for resampling (default: 24000).
     - selected_channel: int, the index of the channel to select (default: None, meaning no channel selection).
 
@@ -50,66 +41,42 @@ def load_audio_to_tensor(audio_input, sr=24000, selected_channel=None):
     - A PyTorch tensor of shape (B, C, T) where B is batch size, C is number of channels, and T is time frames.
     """
 
-    def resample_if_needed(audio, orig_sr, target_sr):
-        """Resample the audio only if the original and target sampling rates differ."""
-        return librosa.resample(audio, orig_sr=orig_sr, target_sr=target_sr) if orig_sr != target_sr else audio
+    def resample_audio(audio_segment, target_sr):
+        """Resample the audio to the target sampling rate."""
+        return audio_segment.set_frame_rate(target_sr)
 
     # Load from file path
     if isinstance(audio_input, str):
-        audio_array, orig_sr = librosa.load(audio_input, sr=None, mono=False)
-        if sr is not None:
-            audio_array = resample_if_needed(audio_array, orig_sr, sr)
-        audio_array = torch.tensor(audio_array).float()
-
-    # Handle NumPy array input
-    elif isinstance(audio_input, np.ndarray):
-        if sr is not None:
-            audio_input = resample_if_needed(audio_input, orig_sr=librosa.get_samplerate(audio_input), target_sr=sr)
-        audio_array = torch.from_numpy(audio_input).float()
-
-    # Handle list of arrays or lists
-    elif isinstance(audio_input, list):
-        audio_tensors = [
-            torch.tensor(
-                resample_if_needed(arr, librosa.get_samplerate(arr), sr)).float() if sr is not None else torch.tensor(
-                arr).float()
-            for arr in audio_input
-        ]
-        if all(t.dim() == 1 for t in audio_tensors):
-            audio_array = pad_sequence(audio_tensors, batch_first=True)
-        else:
-            raise ValueError("All elements in the list must be 1D tensors or numpy arrays.")
+        audio_segment = AudioSegment.from_file(audio_input)
+        if audio_segment.frame_rate != sr:
+            audio_segment = resample_audio(audio_segment, sr)
+        audio_array = np.array(audio_segment.get_array_of_samples(), dtype=np.float32)
+        num_channels = audio_segment.channels
+        audio_array = np.reshape(audio_array, (-1, num_channels)).T  # (Channels, T)
+        audio_tensor = torch.tensor(audio_array).float()
 
     # Handle Torch Tensor directly
     elif isinstance(audio_input, torch.Tensor):
-        audio_array = audio_input
-        if sr is not None and audio_array.dim() == 1:
-            audio_array = torch.tensor(
-                resample_if_needed(audio_array.numpy(), orig_sr=librosa.get_samplerate(audio_array), target_sr=sr)
-            ).float()
+        audio_tensor = audio_input
     else:
-        raise ValueError("Unsupported audio input type")
-
+        raise ValueError("Unsupported audio input type. Expected file path or torch.Tensor.")
     # Channel selection
-    if audio_array.dim() == 2:  # (Channels, T)
-        if selected_channel is not None:
-            if selected_channel >= audio_array.shape[0]:
-                raise ValueError(
-                    f"Selected channel {selected_channel} is out of range for audio with {audio_array.shape[0]} channels.")
-            audio_array = audio_array[selected_channel:selected_channel + 1]  # Select specific channel
-    elif audio_array.dim() == 3:  # (Batch, Channels, T)
-        if selected_channel is not None:
-            if selected_channel >= audio_array.shape[1]:
-                raise ValueError(
-                    f"Selected channel {selected_channel} is out of range for audio with {audio_array.shape[1]} channels.")
-            audio_array = audio_array[:, selected_channel:selected_channel + 1, :]  # Select specific channel
-
+    if selected_channel is not None:
+        if selected_channel >= audio_tensor.shape[0]:
+            raise ValueError(
+                f"Selected channel {selected_channel} is out of range for audio with {audio_tensor.shape[0]} channels."
+            )
+        audio_tensor = audio_tensor[selected_channel:selected_channel + 1]  # Select specific channel
+    else:
+        # take the average of all channels
+        audio_tensor = torch.mean(audio_tensor, dim=0, keepdim=True)
     # Dimension adjustment to (B, C, T)
-    if audio_array.dim() == 1:  # (T)
-        audio_array = audio_array.unsqueeze(0).unsqueeze(0)  # (B=1, C=1, T)
-    elif audio_array.dim() == 2:  # (C, T) or (T, C)
-        audio_array = audio_array.unsqueeze(0)  # (B=1, C, T)
-    elif audio_array.dim() > 3:
-        raise ValueError("Audio input has unsupported dimensions after processing.")
+    if audio_tensor.dim() == 1:  # (T)
+        audio_tensor = audio_tensor.unsqueeze(0).unsqueeze(0)  # (B=1, C=1, T)
+    elif audio_tensor.dim() == 2:  # (C, T)
+        audio_tensor = audio_tensor.unsqueeze(0)  # (B=1, C, T)
+    elif audio_tensor.dim() > 3:
+        raise ValueError("Audio input has unsupported dimensions after processing, expected 1D or 2D tensor, got "
+                         f"{audio_tensor.dim()}D tensor.", audio_tensor.shape)
 
-    return audio_array
+    return audio_tensor

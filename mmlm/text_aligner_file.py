@@ -3,7 +3,6 @@ import math
 import pandas as pd
 import json
 from pydub import AudioSegment
-from tqdm import tqdm
 from transformers import AutoTokenizer
 import argparse
 import logging

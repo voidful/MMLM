@@ -5,20 +5,22 @@ from torch.nn import CrossEntropyLoss
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.modeling_outputs import CausalLMOutputWithPast
 import torch
-
+import torch.nn.functional as F
 from mmlm.listener import ListenFeatureExtractor
 
 
 class MMLM(nn.Module):
-    def __init__(self):
+    def __init__(self, config="voidful/SmolLM2-360M-Instruct-ASR"):
         super().__init__()
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         # Language Model Setup
-        self.lm_model = AutoModelForCausalLM.from_pretrained("voidful/SmolLM2-360M-Instruct-ASR").to(self.device)
-        self.tokenizer = AutoTokenizer.from_pretrained("voidful/SmolLM2-360M-Instruct-ASR")
+        self.lm_model = AutoModelForCausalLM.from_pretrained(config).to(self.device)
+        self.tokenizer = AutoTokenizer.from_pretrained(config)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.listener = ListenFeatureExtractor().to(self.device)
-        self.adapter = nn.Linear(512, 960).to(self.device)
+        self.adapter = nn.Linear(512, self.lm_model.get_input_embeddings().weight.shape[-1]).to(self.device)
+        for param in self.lm_model.parameters():
+            param.requires_grad = False
 
     def encode_text(self, input_ids):
         embeder = self.lm_model.get_input_embeddings()
@@ -36,7 +38,7 @@ class MMLM(nn.Module):
 
     def forward(
             self,
-            inputs_values: Optional[torch.FloatTensor] = None,
+            input_values: Optional[torch.FloatTensor] = None,
             labels: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
@@ -50,8 +52,18 @@ class MMLM(nn.Module):
         return_dict = return_dict if return_dict is not None else self.lm_model.config.use_return_dict
 
         # encode audio
-        audio_embeds = self.encode_audio(inputs_values)
+        audio_embeds = self.encode_audio(input_values)
         text_embeds, input_ids, labels = self.encode_text(labels)
+
+        audio_len = audio_embeds.size(1)
+        text_len = text_embeds.size(1)
+        if text_len < audio_len:
+            padding_size = audio_len - text_len
+            text_embeds = F.pad(text_embeds, (0, 0, 0, padding_size))  # (left, right, top, bottom)
+        elif text_len > audio_len:
+            padding_size = text_len - audio_len
+            audio_embeds = F.pad(audio_embeds, (0, 0, 0, padding_size))
+
         # sum audio and text embeddings
         inputs_embeds = audio_embeds + text_embeds
 
@@ -67,8 +79,14 @@ class MMLM(nn.Module):
         logits = outputs[0]
         loss = None
         if labels is not None:
+            logits_len = logits.size(1)
+            labels_len = labels.size(1)
             loss_fct = CrossEntropyLoss()
-            labels = labels[:, -logits.shape[1]:]
+            if labels_len < logits_len:
+                padding_size = logits_len - labels_len
+                labels = F.pad(labels, (0, padding_size), value=-100)
+            elif labels_len > logits_len:
+                labels = labels[:, :logits_len]
             shift_logits = logits.reshape(-1, logits.size(-1))
             shift_labels = labels.reshape(-1)
             loss = loss_fct(shift_logits, shift_labels)
