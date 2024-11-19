@@ -32,8 +32,7 @@ class MMLMASR(PreTrainedModel):
         # Language Model Setup
         self.lm_model = AutoLigerKernelForCausalLM.from_pretrained(
             config.lm_model_name,
-            torch_dtype=torch.float16,
-            attn_implementation="flash_attention_2", device_map="auto"
+            attn_implementation="flash_attention_2"
         )
         self.tokenizer = AutoTokenizer.from_pretrained(config.lm_model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
