@@ -9,14 +9,10 @@ from mmlm.utility import load_audio_to_tensor
 class ListenFeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.device = device
-        mimi_model = MimiModel.from_pretrained("kyutai/mimi").to(device)
-        for param in mimi_model.parameters():
-            param.requires_grad = False
-        self.embeddings = mimi_model.encoder.to(device)
-        self.model = mimi_model.encoder_transformer.to(device)
-        self.downsample = mimi_model.downsample.to(device)
+        mimi_model = MimiModel.from_pretrained("kyutai/mimi")
+        self.embeddings = mimi_model.encoder
+        self.model = mimi_model.encoder_transformer
+        self.downsample = mimi_model.downsample
         for param in self.embeddings.parameters():
             param.requires_grad = False
         for param in self.model.parameters():
@@ -37,12 +33,12 @@ class ListenFeatureExtractor(nn.Module):
         self.layer_outputs.append(downsampled_output)
 
     def forward(self, audio_input):
-        audio_input = audio_input.to(self.device)
+        audio_input = audio_input
         # Clear previous layer outputs
         self.layer_outputs = []
 
         # Prepare audio input tensor
-        audio_array = load_audio_to_tensor(audio_input, 24000).to(self.device)
+        audio_array = load_audio_to_tensor(audio_input, 24000)
 
         # Get embeddings and pass them through the transformer layers
         embeddings = self.embeddings(audio_array)

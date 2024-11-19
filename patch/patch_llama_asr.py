@@ -3,8 +3,8 @@ import copy
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import AutoProcessor
 
-tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-11B-Vision")
-pretrained = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-3.2-11B-Vision")
+tokenizer = AutoTokenizer.from_pretrained("voidful/Llama-3.2-8B-Instruct")
+pretrained = AutoModelForCausalLM.from_pretrained("voidful/Llama-3.2-8B-Instruct")
 processor = AutoProcessor.from_pretrained("openai/whisper-large-v3-turbo")
 
 whisper_dict = processor.tokenizer.get_vocab()
@@ -35,5 +35,5 @@ add_tokens = (["[PAD]", "[END_PAD]"]+
 num_added_toks = processor.tokenizer.add_tokens(add_tokens)
 pretrained.resize_token_embeddings(len(processor.tokenizer))
 
-processor.tokenizer.push_to_hub("voidful/Llama-3.2-11B-ASR")
-pretrained.push_to_hub("voidful/Llama-3.2-11B-ASR")
+processor.tokenizer.push_to_hub("voidful/Llama-3.2-8B-ASR")
+pretrained.push_to_hub("voidful/Llama-3.2-8B-ASR")
