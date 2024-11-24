@@ -7,30 +7,30 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.configuration_utils import PretrainedConfig
 import torch
 import torch.nn.functional as F
-from mmlm.listener import ListenFeatureExtractor
+from mmlm.synth import SynthFeatureExtractor
 
 
-class MMLMASRConfig(PretrainedConfig):
-    model_type = "mmlmasr"
+class MMLMTTSConfig(PretrainedConfig):
+    model_type = "mmlmtts"
 
-    def __init__(self, lm_model_name="voidful/SmolLM2-360M-Instruct-ASR", **kwargs):
+    def __init__(self, lm_model_name="voidful/SmolLM2-360M-Instruct-TTS", **kwargs):
         super().__init__(**kwargs)
         self.lm_model_name = lm_model_name
 
 
-class MMLMASR(PreTrainedModel):
-    config_class = MMLMASRConfig
+class MMLMTTS(PreTrainedModel):
+    config_class = MMLMTTSConfig
 
-    def __init__(self, config: MMLMASRConfig):
+    def __init__(self, config: MMLMTTSConfig):
         if not isinstance(config, PretrainedConfig):
             raise ValueError(
-                f"Parameter config in `MMLMASR(config)` should be an instance of class `PretrainedConfig`, "
+                f"Parameter config in `MMLMTTS(config)` should be an instance of class `PretrainedConfig`, "
                 f"but got {type(config)} instead. To create a model from a pretrained model, use "
-                f"`MMLMASR.from_pretrained(PRETRAINED_MODEL_NAME)`."
+                f"`MMLMTTS.from_pretrained(PRETRAINED_MODEL_NAME)`."
             )
         super().__init__(config)
         # Language Model Setup
-        self.lm_model = AutoLigerKernelForCausalLM.from_pretrained(
+        lm_model = AutoLigerKernelForCausalLM.from_pretrained(
             config.lm_model_name,
             attn_implementation="flash_attention_2",
             trust_remote_code=True,
@@ -38,22 +38,29 @@ class MMLMASR(PreTrainedModel):
             torch_dtype=torch.bfloat16,
             rope=True,
             swiglu=True,
-            cross_entropy=True,
+            cross_entropy=False,
             fused_linear_cross_entropy=False,
             rms_norm=True
         )
+        self.lm_model = lm_model.model
         self.tokenizer = AutoTokenizer.from_pretrained(config.lm_model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.listener = ListenFeatureExtractor()
-        self.adapter = nn.Linear(512, self.lm_model.get_input_embeddings().weight.shape[-1])
-
+        self.synthizer = SynthFeatureExtractor()
+        self.speaker_adapter = nn.Linear(196, lm_model.get_input_embeddings().weight.shape[-1])
+        self.multi_decoding_head = nn.ModuleList(
+            [nn.Linear(lm_model.config.hidden_size, 2048) for _ in range(8)])
+        self.layer_norm = nn.LayerNorm(2048)
+        learned_layer_weight_init = (torch.arange(8, 0, step=-1).float().
+                                     view(8, 1, 1, 1))
+        self.learned_layer_weight = nn.Parameter(learned_layer_weight_init)
+        self.tts_text_head = lm_model.lm_head
         # Freeze LM parameters
-        for param in self.lm_model.parameters():
+        for param in self.lm_model.model.parameters():
             param.requires_grad = False
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        config = MMLMASRConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        config = MMLMTTSConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
         return super().from_pretrained(pretrained_model_name_or_path, config=config, *model_args, **kwargs)
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
@@ -62,25 +69,30 @@ class MMLMASR(PreTrainedModel):
         to reduce memory usage at the cost of additional computation during the backward pass.
         """
         self.lm_model.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
-        if hasattr(self.listener, "gradient_checkpointing_enable"):
-            self.listener.gradient_checkpointing_enable(gradient_checkpointing_kwargs)
 
     def gradient_checkpointing_disable(self):
         """
         Disable gradient checkpointing for the model.
         """
         self.lm_model.gradient_checkpointing_disable()
-        if hasattr(self.listener, "gradient_checkpointing_disable"):
-            self.listener.gradient_checkpointing_disable()
+
+    def encode_system_prompt(self, synthesis_text_ids, speaker_emb):
+        system_prompt = self.tokenizer.apply_chat_template(
+            [{"role": "system", "content": f"Synth [SYN_TEXT] with reference speech [REFSPEECH]"}],
+            tokenize=False, add_generation_prompt=False)
+        t0, s1, t2 = system_prompt.split("[REFSPEECH]")
+        t01, t02 = t0.split("[SYN_TEXT]")
+        t01 = self.tokenizer.encode(t01, add_special_tokens=False, return_tensors='pt').squeeze()
+        t02 = self.tokenizer.encode(t02, add_special_tokens=False, return_tensors='pt').squeeze()
+        t2 = self.tokenizer.encode(t2, add_special_tokens=False, return_tensors='pt').squeeze()
+        return torch.cat(
+            self.encode_text(t01) + self.encode_text(synthesis_text_ids) + self.encode_text(t02) +
+            self.speaker_adapter(speaker_emb) + self.encode_text(t2))
 
     def encode_text(self, input_ids):
         embeder = self.lm_model.get_input_embeddings()
-        # Create input_ids and labels for causal language model
-        labels = input_ids.clone()
-        labels[:, :-1] = input_ids[:, 1:]
-        labels[:, -1] = -100
         embedding = embeder(input_ids)
-        return embedding, input_ids, labels
+        return embedding
 
     def encode_audio(self, input_values):
         inputs_embeds = self.listener(input_values)
@@ -90,6 +102,7 @@ class MMLMASR(PreTrainedModel):
     def forward(
             self,
             input_values: Optional[torch.FloatTensor] = None,
+            tts_ids: Optional[torch.LongTensor] = None,
             labels: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
@@ -101,20 +114,29 @@ class MMLMASR(PreTrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # Encode audio
-        audio_embeds = self.encode_audio(input_values)
-        text_embeds, input_ids, labels = self.encode_text(labels)
+        mimi_embeds = []
+        for i in range(8):
+            input_scale = self.embed_tokens(input_values[:, i, :])
+            mimi_embeds.append(input_scale)
+        weighted_inputs_embeds = torch.mul(torch.stack(mimi_embeds, dim=0),
+                                           F.softmax(self.learned_layer_weight, dim=0))
+        mimi_embeds = torch.sum(weighted_inputs_embeds, dim=0)
 
-        audio_len = audio_embeds.size(1)
+        text_embeds = self.encode_text(labels)
+
+        audio_len = mimi_embeds.size(1)
         text_len = text_embeds.size(1)
         if text_len < audio_len:
             padding_size = audio_len - text_len
             text_embeds = F.pad(text_embeds, (0, 0, 0, padding_size))  # (left, right, top, bottom)
         elif text_len > audio_len:
             padding_size = text_len - audio_len
-            audio_embeds = F.pad(audio_embeds, (0, 0, 0, padding_size))
+            mimi_embeds = F.pad(mimi_embeds, (0, 0, 0, padding_size))
 
         # Sum audio and text embeddings
-        inputs_embeds = audio_embeds + text_embeds
+        inputs_embeds = mimi_embeds + text_embeds
+        system_embeds = self.encode_system_prompt(tts_ids)
+        inputs_embeds = torch.cat([system_embeds, inputs_embeds])
 
         # Forward pass through LM
         outputs = self.lm_model(

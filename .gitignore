@@ -165,3 +165,14 @@ asr_trainer.py
 asr_trainer_v2.py
 codec_bart_model.py
 train.py
+### Example user template template
+### Example user template
+
+# IntelliJ project files
+.idea
+*.iml
+out
+gen
+train_asr_slurm.sh
+train_asr_slurm.py
+ds_config.json

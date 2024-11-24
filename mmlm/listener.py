@@ -44,11 +44,17 @@ class ListenFeatureExtractor(nn.Module):
         embeddings = self.embeddings(audio_array)
         _ = self.model(embeddings.transpose(1, 2), past_key_values=None)
 
-        # Stack downsampled outputs and apply weights
-        layer_outputs = torch.stack(self.layer_outputs,
-                                    dim=0)  # Shape: (num_layers, batch, sequence_length, hidden_dim)
-        weights = F.softmax(self.layer_weights, dim=0)  # Normalize weights across layers
-        # Perform weighted sum across the layer dimension (dim=0)
+        layer_outputs = torch.stack(self.layer_outputs, dim=0)  # Shape: (num_layers, batch, seq_length, hidden_dim)
+
+        # Apply layer norm to each layer's output
+        layer_outputs = F.layer_norm(layer_outputs, layer_outputs.size()[2:])
+
+        # Compute weights and perform weighted sum
+        weights = F.softmax(self.layer_weights, dim=0)
         weighted_sum = torch.sum(weights[:, None, None, None] * layer_outputs,
-                                 dim=0)  # Shape: (batch, sequence_length, hidden_dim)
-        return weighted_sum.transpose(1, 2)
+                                 dim=0)  # Shape: (batch, seq_length, hidden_dim)
+
+        # Apply layer norm to the final weighted sum
+        weighted_sum = weighted_sum.transpose(1, 2)
+        weighted_sum = F.layer_norm(weighted_sum, weighted_sum.size()[1:])
+        return weighted_sum
