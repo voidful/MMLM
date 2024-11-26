@@ -1,7 +1,10 @@
+from typing import Optional
+
 from pydub import AudioSegment
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
+import torch.nn.functional as F
 
 
 class MMLMUtility():
@@ -26,6 +29,47 @@ class MMLMUtility():
                 'labels': pad_sequence([torch.tensor(i['label_ids']) for i in features], batch_first=True,
                                        padding_value=-100),
             }
+
+
+def align_and_sum_embeddings(voice_embeds, text_embeds):
+    # Ensure both embeddings have the same sequence length
+    # Assuming mimi_embeds and text_embeds are (batch_size, seq_len, embedding_dim)
+    max_len = max(voice_embeds.size(1), text_embeds.size(1))
+    if voice_embeds.size(1) < max_len:
+        voice_embeds = F.pad(voice_embeds, (0, 0, max_len - voice_embeds.size(1), 0))
+    if text_embeds.size(1) < max_len:
+        text_embeds = F.pad(text_embeds, (0, 0, 0, max_len - text_embeds.size(1)))
+    return voice_embeds + text_embeds
+
+
+def align_logits_and_labels(logits, labels):
+    logits_len = logits.size(1)
+    labels_len = labels.size(1)
+    if labels_len < logits_len:
+        labels = F.pad(labels, (0, logits_len - labels_len), value=-100)
+    elif labels_len > logits_len:
+        labels = labels[:, :logits_len]
+    return logits, labels
+
+
+def add_bos_eos_tokens_if_not_exist(tokenizer, input_text: Optional[torch.LongTensor] = None, padding_value=0):
+    """
+    Add BOS and EOS tokens to each element in the input text if they do not exist.
+    """
+    if input_text is not None:
+        if input_text.dim() == 1:
+            input_text = input_text.unsqueeze(0)
+        processed_texts = []
+        for sequence in input_text:
+            if sequence[0].item() != tokenizer.bos_token_id:
+                sequence = torch.cat(
+                    [torch.tensor([tokenizer.bos_token_id], dtype=torch.long, device=sequence.device), sequence])
+            if sequence[-1].item() != tokenizer.eos_token_id:
+                sequence = torch.cat(
+                    [sequence, torch.tensor([tokenizer.eos_token_id], dtype=torch.long, device=sequence.device)])
+            processed_texts.append(sequence)
+        input_text = torch.nn.utils.rnn.pad_sequence(processed_texts, batch_first=True, padding_value=padding_value)
+    return input_text
 
 
 def load_audio_to_tensor(audio_input, sr=24000, selected_channel=None):

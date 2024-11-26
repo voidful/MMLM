@@ -3,33 +3,46 @@ import math
 import pandas as pd
 import json
 from pydub import AudioSegment
+from tqdm import tqdm
 from transformers import AutoTokenizer
 import argparse
 import logging
 from multiprocessing import cpu_count
-from tqdm.contrib.concurrent import process_map
+from concurrent.futures import ProcessPoolExecutor
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s %(levelname)s:%(message)s',
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.StreamHandler(), logging.FileHandler("process.log")]
 )
 
+# Global variable for tokenizer
+global_tokenizer = None
+
+def init_tokenizer(model_config):
+    """
+    Initialize the global tokenizer.
+    This function is called once at the start of each process.
+    """
+    global global_tokenizer
+    if global_tokenizer is None:
+        logging.info("Initializing tokenizer...")
+        global_tokenizer = AutoTokenizer.from_pretrained(model_config)
+        global_tokenizer.add_special_tokens({
+            'pad_token': '[PAD]',
+            'additional_special_tokens': ['[END_PAD]']
+        })
+
+
 class TextAligner:
-    def __init__(self, model_config="deepdml/faster-whisper-large-v3-turbo-ct2",
-                 feature_extraction_interval=0.08,
+    def __init__(self, feature_extraction_interval=0.08,
                  PAD_TOKEN='[PAD]', EPAD_TOKEN='[END_PAD]'):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_config)
+        global global_tokenizer
+        self.tokenizer = global_tokenizer  # Use the shared tokenizer
         self.feature_extraction_interval = feature_extraction_interval
         self.PAD_TOKEN = PAD_TOKEN
         self.EPAD_TOKEN = EPAD_TOKEN
-
-        # Add PAD_TOKEN and EPAD_TOKEN to the tokenizer's vocabulary and special tokens
-        self.tokenizer.add_special_tokens({
-            'pad_token': self.PAD_TOKEN,
-            'additional_special_tokens': [self.EPAD_TOKEN]
-        })
 
     def align_words(self, audio_path, word_csv_path):
         try:
@@ -56,15 +69,13 @@ class TextAligner:
             logging.warning(f"Word CSV {word_csv_path} does not contain required columns ('start' or 'word').")
             return None, None
 
-        # Check if the DataFrame is empty
         if word_df.empty:
             logging.warning(f"The word CSV {word_csv_path} is empty.")
             return None, None
 
         try:
-            # Clean up and process the 'start' column
             word_df[start_col] = word_df[start_col].astype(str).str.replace('s', '').astype(float)
-            start_sec = word_df[start_col].iloc[0]  # This should now be safe
+            start_sec = word_df[start_col].iloc[0]
         except Exception as e:
             logging.warning(f"Failed to process 'start' column in {word_csv_path}: {e}")
             return None, None
@@ -107,60 +118,78 @@ class TextAligner:
 
 
 def process_single_file(params):
-    word_csv_path, segment_csv_path, wav_path, model_config = params
-    aligner = TextAligner(model_config=model_config)
-    raw_text, text_with_pad = aligner.align_words(wav_path, word_csv_path)
+    try:
+        word_csv_path, segment_csv_path, wav_path, model_config = params
+        init_tokenizer(model_config)  # Ensure the tokenizer is initialized in the process
+        aligner = TextAligner()
+        raw_text, text_with_pad = aligner.align_words(wav_path, word_csv_path)
 
-    if raw_text is not None and text_with_pad is not None:
-        try:
-            segment_df = pd.read_csv(segment_csv_path)
-            text_field = ' '.join(segment_df['text'].astype(str).tolist()) if 'text' in segment_df.columns else ""
-        except Exception as e:
-            logging.warning(f"Failed to read segment CSV {segment_csv_path}: {e}")
-            text_field = ""
+        if raw_text is not None and text_with_pad is not None:
+            try:
+                segment_df = pd.read_csv(segment_csv_path)
+                text_field = ' '.join(segment_df['text'].astype(str).tolist()) if 'text' in segment_df.columns else ""
+            except Exception as e:
+                logging.warning(f"Failed to read segment CSV {segment_csv_path}: {e}")
+                text_field = ""
 
-        return {
-            "audio_path": wav_path,
-            "text_with_pad": text_with_pad,
-            "text": text_field
-        }
-    return None
+            return {
+                "audio_path": wav_path,
+                "text_with_pad": text_with_pad,
+                "text": text_field
+            }
+        return None
+    except Exception as e:
+        logging.error(f"Error in process_single_file: {e}")
+        return None
 
 
 def process_file(args):
     word_dir, segment_dir, wav_dir, output_path = args.word_dir, args.segment_dir, args.wav_dir, args.output_path
 
-    # Function to recursively find all files in a directory
     def find_files(directory, extension):
         for root, _, files in os.walk(directory):
             for file in files:
                 if file.endswith(extension):
                     yield os.path.join(root, file)
 
-    # Find all relevant files in each directory
     word_files = list(find_files(word_dir, '.csv'))
     segment_files = list(find_files(segment_dir, '.csv'))
     audio_files = list(find_files(wav_dir, ('.m4a', '.wav', '.mp3')))
 
-    # Match files by name (without directory or extension)
     word_map = {os.path.splitext(os.path.basename(f))[0]: f for f in word_files}
     segment_map = {os.path.splitext(os.path.basename(f))[0]: f for f in segment_files}
     audio_map = {os.path.splitext(os.path.basename(f))[0]: f for f in audio_files}
 
-    # Collect file pairs
     file_list = []
     for name in word_map:
         if name in segment_map and name in audio_map:
             file_list.append((word_map[name], segment_map[name], audio_map[name], args.model_config))
 
-    logging.info(f"Total files to process: {len(file_list)}")
+    total_partitions = args.partition_total
+    partition_index = args.partition_index - 1
+    file_list = file_list[partition_index::total_partitions]
 
-    with open(output_path, 'w', encoding='utf-8') as output_file:
-        for result in process_map(process_single_file, file_list, max_workers=cpu_count(), chunksize=1):
-            if result:
-                json.dump(result, output_file, ensure_ascii=False)
-                output_file.write('\n')
-                output_file.flush()
+    processed_files = set()
+    if os.path.exists(output_path):
+        with open(output_path, 'r', encoding='utf-8') as output_file:
+            for line in output_file:
+                try:
+                    processed_files.add(json.loads(line)['audio_path'])
+                except json.JSONDecodeError:
+                    continue
+
+    file_list = [f for f in file_list if f[2] not in processed_files]
+
+    logging.info(f"Processing partition {args.partition_index}/{args.partition_total}")
+    logging.info(f"Total files to process in this partition: {len(file_list)}")
+
+    with open(output_path, 'a', encoding='utf-8') as output_file:
+        with ProcessPoolExecutor(max_workers=cpu_count()) as executor:
+            for result in tqdm(executor.map(process_single_file, file_list), total=len(file_list)):
+                if result:
+                    json.dump(result, output_file, ensure_ascii=False)
+                    output_file.write('\n')
+                    output_file.flush()
 
 
 def main():
@@ -170,8 +199,15 @@ def main():
     parser.add_argument("--wav_dir", type=str, required=True, help="Directory containing audio files.")
     parser.add_argument("--output_path", type=str, required=True, help="Output JSONL file path.")
     parser.add_argument("--model_config", type=str, default="deepdml/faster-whisper-large-v3-turbo-ct2", help="Model configuration.")
+    parser.add_argument("--partition", type=str, default="1/1", help="Partition in the format index/total (e.g., 1/10).")
 
     args = parser.parse_args()
+
+    partition_parts = args.partition.split('/')
+    args.partition_index = int(partition_parts[0])
+    args.partition_total = int(partition_parts[1])
+
+    init_tokenizer(args.model_config)  # Initialize tokenizer once in the main process
     process_file(args)
 
 

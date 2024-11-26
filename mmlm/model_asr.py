@@ -8,6 +8,7 @@ from transformers.configuration_utils import PretrainedConfig
 import torch
 import torch.nn.functional as F
 from mmlm.listener import ListenFeatureExtractor
+from mmlm.utility import align_and_sum_embeddings
 
 
 class MMLMASRConfig(PretrainedConfig):
@@ -104,18 +105,7 @@ class MMLMASR(PreTrainedModel):
         audio_embeds = self.encode_audio(input_values)
         text_embeds, input_ids, labels = self.encode_text(labels)
 
-        audio_len = audio_embeds.size(1)
-        text_len = text_embeds.size(1)
-        if text_len < audio_len:
-            padding_size = audio_len - text_len
-            text_embeds = F.pad(text_embeds, (0, 0, 0, padding_size))  # (left, right, top, bottom)
-        elif text_len > audio_len:
-            padding_size = text_len - audio_len
-            audio_embeds = F.pad(audio_embeds, (0, 0, 0, padding_size))
-
-        # Sum audio and text embeddings
-        inputs_embeds = audio_embeds + text_embeds
-
+        inputs_embeds = align_and_sum_embeddings(audio_embeds, text_embeds)
         # Forward pass through LM
         outputs = self.lm_model(
             inputs_embeds=inputs_embeds,

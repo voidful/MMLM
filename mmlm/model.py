@@ -1,245 +1,289 @@
-from typing import Optional, Union, Tuple
-
+import copy
+from typing import Optional, Union, Tuple, List
 from torch import nn
 from torch.nn import CrossEntropyLoss
-from transformers import AutoModelForCausalLM, AutoModel, AutoTokenizer
+from transformers import PreTrainedModel, AutoTokenizer, AutoModelForCausalLM
+from liger_kernel.transformers import AutoLigerKernelForCausalLM
 from transformers.modeling_outputs import CausalLMOutputWithPast
-from embedder import export_embedder
+from transformers.configuration_utils import PretrainedConfig
 import torch
 import torch.nn.functional as F
 
+from mmlm.listener import ListenFeatureExtractor
+from mmlm.synth import SynthFeatureExtractor
 
-class MMLM(nn.Module):
-    def __init__(
-        self,
-        lm_config,
-        lm_model=None,
-        lm_tokenizer=None,
-        audio_config=1,
-        audio_model=None,
-        audio_adapter_config=None,
-        visual_config=1,
-        visual_model=None,
-        visual_adapter_config=None,
-    ):
-        super().__init__()
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+from transformers import PretrainedConfig
 
-        # Language Model Setup
-        self.lm_model = (
-            lm_model.to(self.device)
-            if lm_model is not None
-            else AutoModelForCausalLM.from_pretrained(lm_config).to(self.device)
+from mmlm.utility import add_bos_eos_tokens_if_not_exist, align_and_sum_embeddings, align_logits_and_labels
+import torch
+from torch import nn
+from torch.nn import CrossEntropyLoss
+import torch.nn.functional as F
+from transformers import AutoTokenizer, PreTrainedModel
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
+# Assuming AutoLigerKernelForCausalLM is similar to AutoModelForCausalLM
+# Replace it with AutoModelForCausalLM if AutoLigerKernelForCausalLM is unavailable
+from liger_kernel.transformers import AutoLigerKernelForCausalLM
+
+
+class MMLMConfig(PretrainedConfig):
+    model_type = "mmlm"
+
+    def __init__(self, lm_model_name="voidful/SmolLM2-360M-Instruct", num_heads=8, **kwargs):
+        super().__init__(**kwargs)
+        self.lm_model_name = lm_model_name
+        self.num_heads = num_heads
+        # Add any additional configuration parameters here
+
+
+class MMLM(PreTrainedModel):
+    config_class = MMLMConfig
+
+    def __init__(self, config: MMLMConfig):
+        super().__init__(config)
+        self.config = config
+        self.num_heads = config.num_heads
+
+        self._initialize_language_model(config)
+        self._initialize_custom_components()
+
+    def _initialize_language_model(self, config: MMLMConfig):
+        self.lm_model = AutoLigerKernelForCausalLM.from_pretrained(
+            config.lm_model_name,
+            trust_remote_code=True,
+            use_cache=False,
+            torch_dtype=torch.bfloat16,
+            rope=True,
+            swiglu=True,
+            cross_entropy=True,
+            fused_linear_cross_entropy=False,
+            rms_norm=True,
         )
-        self.tokenizer = (
-            lm_tokenizer
-            if lm_tokenizer
-            else AutoTokenizer.from_pretrained(lm_config)
-        )
+        self.listener_head = copy.deepcopy(self.lm_model.lm_head)
+        self.speaker_head = copy.deepcopy(self.lm_model.lm_head)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.lm_model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        # Modality Configurations
-        self.audio_config = audio_config
-        self.visual_config = visual_config
-
-        # Audio Feature Processing
-        if isinstance(audio_config, int):
-            self._setup_discrete_feature_weights(audio_config, "audio")
-        else:
-            self._setup_continuous_feature_processing(
-                audio_config, audio_model, audio_adapter_config, "audio"
-            )
-
-        # Visual Feature Processing
-        if isinstance(visual_config, int):
-            self._setup_discrete_feature_weights(visual_config, "visual")
-        else:
-            self._setup_continuous_feature_processing(
-                visual_config, visual_model, visual_adapter_config, "visual"
-            )
-
-        base_audio_tag_id = self.tokenizer.encode(f"CAUDIO_TAG_{0}")[0]
-        self.continue_audio_feature_type_ids = [base_audio_tag_id, base_audio_tag_id + 100]
-
-        base_continue_visual_tag_id = self.tokenizer.encode(f"CVISUAL_TAG_{0}")[0]
-        self.continue_visual_feature_type_ids = [base_continue_visual_tag_id, base_continue_visual_tag_id + 100]
-
-        base_discrete_audio_tag_id = self.tokenizer.encode(f"a_tok_{0}")[0]
-        self.discrete_audio_feature_type_ids = [base_discrete_audio_tag_id, base_discrete_audio_tag_id + 1024 * 10]
-
-        base_discrete_visual_tag_id = self.tokenizer.encode(f"v_tok_{0}")[0]
-        self.discrete_visual_feature_type_ids = [base_discrete_visual_tag_id, base_discrete_visual_tag_id + 1024 * 10]
-
-    def _setup_discrete_feature_weights(self, config, modality):
-        learnable_weight_init = torch.arange(config, 0, step=-1).float().view(config, 1, 1)
-        setattr(self, f"{modality}_learnable_weight", nn.Parameter(learnable_weight_init))
-
-    def _setup_continuous_feature_processing(self, config, model, adapter_config, modality):
-        model = model.to(self.device) if model is not None else AutoModel.from_pretrained(config)
-        setattr(self, f"{modality}_model", model)
-        setattr(
-            self,
-            f"{modality}_adapter",
-            export_embedder[adapter_config](
-                input_size=model.config.hidden_size, output_size=self.lm_model.config.hidden_size
-            ).to(self.device),
+    def _initialize_custom_components(self):
+        self.listener = ListenFeatureExtractor()
+        self.listener_adapter = nn.Linear(
+            512, self.lm_model.get_input_embeddings().weight.shape[-1]
         )
+
+        # Retrieve the language model's input embeddings
+        lm_embeddings = self.lm_model.get_input_embeddings().weight  # Shape: (vocab_size, embedding_dim)
+        vocab_size, embedding_dim = lm_embeddings.size()
+        # Initialize multi_decoding_head with embeddings sampled from LM's embeddings
+        self.multi_decoding_head = nn.ModuleList([
+            nn.Embedding(2048, embedding_dim) for _ in range(self.num_heads)
+        ])
+        # Initialize linear decoding heads
+        self.linear_decoding_head = nn.ModuleList([
+            nn.Linear(embedding_dim, 2048, bias=False) for _ in range(self.num_heads)
+        ])
+        for i, head in enumerate(self.multi_decoding_head):
+            # Randomly sample 2048 indices from LM's embeddings
+            sampled_indices = torch.randint(0, vocab_size, (2048,))
+            sampled_weights = lm_embeddings[sampled_indices].clone().detach()
+            head.weight = nn.Parameter(sampled_weights)
+            # Tie weights between embedding and linear layers
+            self.linear_decoding_head[i].weight = nn.Parameter(sampled_weights)
+        # Speaker adapter to align speaker embeddings with LM embeddings
+        self.speaker_adapter = nn.Linear(192, embedding_dim)
+        # Layer normalization (if needed)
+        self.layer_norm = nn.LayerNorm(embedding_dim)
+        # Learnable weights for each decoding head
+        self.learned_layer_weight = nn.Parameter(
+            torch.arange(self.num_heads, 0, step=-1).float().view(self.num_heads, 1, 1)
+        )
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
+        config = MMLMConfig.from_pretrained(pretrained_model_name_or_path, **kwargs)
+        return super().from_pretrained(pretrained_model_name_or_path, config=config, *model_args, **kwargs)
+
+    def _tokenize_and_encode(self, text: str) -> torch.Tensor:
+        return self.tokenizer.encode(text, add_special_tokens=False, return_tensors='pt').squeeze()
+
+    def encode_system_prompt(self, speaker_emb):
+        template = self.tokenizer.apply_chat_template(
+            [{"role": "system",
+              "content": "Start a conversation as a helpful assistant with reference speech [REFSPEECH]"}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+        t0, t1 = template.split("[REFSPEECH]")
+        t0 = self._tokenize_and_encode(t0).to(self.lm_model.device)
+        t1 = self._tokenize_and_encode(t1).to(self.lm_model.device)
+        speaker_emb = speaker_emb.to(self.lm_model.device)
+        return torch.cat([
+            self._encode_text(t0.unsqueeze(0)),
+            self.speaker_adapter(speaker_emb).unsqueeze(0),
+            self._encode_text(t1.unsqueeze(0))
+        ], dim=1)
+
+    def _encode_text(self, input_ids):
+        return self.lm_model.get_input_embeddings()(input_ids)
+
+    def _process_audio_embeddings(self, input_values):
+        mimi_embeds = []
+        for i, head in enumerate(self.multi_decoding_head):
+            embed = head(input_values[:, i, :])
+            mimi_embeds.append(embed)
+        # Stack embeddings: (num_heads, batch_size, seq_len, embedding_dim)
+        mimi_embeds = torch.stack(mimi_embeds, dim=0)
+        # Apply softmax to learned_layer_weight and weight the embeddings
+        weights = F.softmax(self.learned_layer_weight, dim=0)  # (num_heads, 1, 1)
+        weighted_embeds = mimi_embeds * weights[:, None, None, :]  # Broadcasting
+        # Sum over heads: (batch_size, seq_len, embedding_dim)
+        mimi_embeds = weighted_embeds.sum(dim=0)
+        return mimi_embeds
+
+    def _encode_audio(self, input_values):
+        inputs_embeds = self.listener(input_values)
+        inputs_embeds = self.listener_adapter(inputs_embeds.permute(0, 2, 1))
+        return inputs_embeds
 
     def forward(
-        self,
-        input_ids: torch.LongTensor = None,
-        audio_features=None,
-        vision_features=None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        inputs_embeds: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.LongTensor] = None,
-        use_cache: Optional[bool] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+            self,
+            input_values: Optional[torch.LongTensor] = None,  # Shape: (batch_size, num_heads, seq_len)
+            listen_audio: Optional[torch.FloatTensor] = None,
+            speaker_emb: Optional[torch.FloatTensor] = None,  # Shape: (batch_size, embedding_dim)
+            listener_text: Optional[torch.LongTensor] = None,  # Shape: (batch_size, seq_len)
+            listener_label: Optional[torch.LongTensor] = None,  # Shape: (batch_size, seq_len)
+            speaker_text: Optional[torch.LongTensor] = None,  # Shape: (batch_size, seq_len)
+            speaker_label: Optional[torch.LongTensor] = None,  # Shape: (batch_size, seq_len)
+            codec_label: Optional[List[torch.LongTensor]] = None,  # List of labels per head
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+    ) -> Union[torch.Tensor, CausalLMOutputWithPast]:
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        output_attentions = output_attentions if output_attentions is not None else self.lm_model.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.lm_model.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.lm_model.config.use_return_dict
+        # Ensure that either speaker_label or listener_label is provided
+        if speaker_label is None and listener_label is None:
+            raise ValueError("Either 'speaker_label' or 'listener_label' must be provided.")
 
-        if inputs_embeds is None:
-            embeder = self.lm_model.get_input_embeddings()
-            inputs_embeds = []
-            for batch_num, batch_input in enumerate(input_ids):
-                audio_discrete_token = []
-                visual_discrete_token = []
-                text_ids = []
-                input_embeds = []
-                for i in batch_input:
-                    if self.discrete_audio_feature_type_ids[0] < i < self.discrete_audio_feature_type_ids[1]:
-                        audio_discrete_token.append(i)
-                        if text_ids:
-                            input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
-                        text_ids = []
-                    elif self.discrete_visual_feature_type_ids[0] < i < self.discrete_visual_feature_type_ids[1]:
-                        visual_discrete_token.append(i)
-                        if text_ids:
-                            input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
-                        text_ids = []
-                    else:
-                        text_ids.append(i)
-                        if len(audio_discrete_token) > 0:
-                            audio_discrete_token = audio_discrete_token[
-                                :len(audio_discrete_token) // self.audio_config * self.audio_config
-                            ]
-                            discrete_audio_input_id = torch.tensor(audio_discrete_token, dtype=torch.long).view(
-                                self.audio_config, -1
-                            )
-                            discrete_audio_input_ids = []
-                            for i in range(self.audio_config):
-                                input_scale = embeder(discrete_audio_input_id[i, :].to(self.device))
-                                discrete_audio_input_ids.append(input_scale)
-                            weighted_discrete_inputs_embeds = torch.mul(
-                                torch.stack(discrete_audio_input_ids, dim=0).to(self.device),
-                                F.softmax(self.audio_learnable_weight, dim=0).to(self.device)
-                            )
-                            weighted_discrete_inputs_embeds = torch.sum(weighted_discrete_inputs_embeds, dim=0)
-                            if discrete_audio_input_ids:
-                                input_embeds.append(weighted_discrete_inputs_embeds)
-                            audio_discrete_token = []
-                        elif len(visual_discrete_token) > 0:
-                            discrete_visual_input_id = torch.tensor(visual_discrete_token).view(self.visual_config, -1)
-                            discrete_visual_input_ids = []
-                            for i in range(self.visual_config):
-                                input_scale = embeder(discrete_visual_input_id[i, :].to(self.device))
-                                discrete_visual_input_ids.append(input_scale)
-                            weighted_discrete_inputs_embeds = torch.mul(
-                                torch.stack(discrete_visual_input_ids, dim=0).to(self.device),
-                                F.softmax(self.visual_learnable_weight, dim=0).to(self.device)
-                            )
-                            weighted_discrete_inputs_embeds = torch.sum(weighted_discrete_inputs_embeds, dim=0)
-                            if discrete_visual_input_ids:
-                                input_embeds.append(weighted_discrete_inputs_embeds)
-                            visual_discrete_token = []
-                if text_ids:
-                    input_embeds.append(embeder(torch.LongTensor(text_ids).to(self.device)))
-                inputs_embeds.append(torch.cat(input_embeds))
-            max_length = max(tensor.size(0) for tensor in inputs_embeds)
-            inputs_embeds = torch.stack([
-                F.pad(tensor, (0, 0, max_length - tensor.size(0), 0), "constant", 0)
-                for tensor in inputs_embeds
-            ])
-            outputs = self.lm_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                use_cache=False,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-        elif input_ids.shape[-1] == 1:
-            outputs = self.lm_model(
-                input_ids=input_ids,
-                use_cache=use_cache,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
-        elif self.audio_config or self.visual_config:
-            for batch_num, batch_input in enumerate(input_ids):
-                vision_features_id = 0
-                audio_features_id = 0
-                for pos, ids in enumerate(batch_input):
-                    if self.continue_audio_feature_type_ids[0] < ids < self.continue_audio_feature_type_ids[1]:
-                        audio_feature = self.audio_adapter(audio_features[batch_num][audio_features_id]).to(self.device)
-                        audio_features_id += 1
-                        inputs_embeds = torch.cat(
-                            (inputs_embeds[:, :pos, :], audio_feature, inputs_embeds[:, pos + 1:, :]), dim=1
-                        ).to(self.device)
-                    if self.continue_visual_feature_type_ids[0] < ids < self.continue_visual_feature_type_ids[1]:
-                        vision_features = self.visual_adapter(vision_features[batch_num][vision_features_id])
-                        vision_features_id += 1
-                        inputs_embeds = torch.cat(
-                            (inputs_embeds[:, :pos, :], vision_features, inputs_embeds[:, pos + 1:, :]), dim=1
-                        )
-            outputs = self.lm_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                use_cache=False,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-                return_dict=return_dict,
-            )
+        if speaker_text is not None:
+            speaker_text = add_bos_eos_tokens_if_not_exist(self.tokenizer, speaker_text)
+        if speaker_label is not None:
+            speaker_label = add_bos_eos_tokens_if_not_exist(self.tokenizer, speaker_label)
 
-        logits = outputs[0]
+        if speaker_text is None and speaker_label is not None:
+            # Shift speaker_label by 1 to create speaker_text
+            speaker_text = speaker_label[:, :-1].contiguous()
+            speaker_label = speaker_label[:, 1:].contiguous()
+        elif speaker_label is None and speaker_text is not None:
+            # Shift speaker_text by 1 to create speaker_label
+            speaker_label = speaker_text[:, 1:].contiguous()
+            speaker_text = speaker_text[:, :-1].contiguous()
+        else:
+            # Both speaker_text and speaker_label are provided
+            speaker_text = speaker_text.contiguous()
+            speaker_label = speaker_label.contiguous()
 
-        loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss()
-            labels = labels[:, -logits.shape[1]:]
-            shift_logits = logits.reshape(-1, logits.size(-1))
-            shift_labels = labels.reshape(-1)
-            loss = loss_fct(shift_logits, shift_labels)
+        # Similar processing for listener_text and listener_label
+        if listener_text is not None:
+            listener_text = add_bos_eos_tokens_if_not_exist(self.tokenizer, listener_text)
+        if listener_label is not None:
+            listener_label = add_bos_eos_tokens_if_not_exist(self.tokenizer, listener_label)
 
-        if not return_dict:
-            output = (logits,) + outputs[1:]
-            return (loss,) + output if loss is not None else output
+        if listener_text is None and listener_label is not None:
+            listener_text = listener_label[:, :-1].contiguous()
+            listener_label = listener_label[:, 1:].contiguous()
+        elif listener_label is None and listener_text is not None:
+            listener_label = listener_text[:, 1:].contiguous()
+            listener_text = listener_text[:, :-1].contiguous()
+        else:
+            listener_text = listener_text.contiguous()
+            listener_label = listener_label.contiguous()
 
-        return CausalLMOutputWithPast(
-            loss=loss,
-            logits=logits,
-            hidden_states=outputs.hidden_states,
+        # Process embeddings
+        mimi_embeds = self._process_audio_embeddings(input_values)  # (batch_size, seq_len, embedding_dim)
+        audio_embeds = self._encode_audio(listen_audio)
+        speaker_embeds = self._encode_text(speaker_text)  # (batch_size, seq_len, embedding_dim)
+        listener_embeds = self._encode_text(listener_text)  # (batch_size, seq_len, embedding_dim)
+
+        # Align and sum embeddings
+        speak_embeds = align_and_sum_embeddings(mimi_embeds, speaker_embeds)
+        listen_embeds = align_and_sum_embeddings(audio_embeds, listener_embeds)
+        system_embeds = self.encode_system_prompt(speaker_emb)
+        # Calculate the length of system_embeds
+        system_embed_length = system_embeds.shape[1]
+
+        # Adjust labels by prepending -100 to mask out system_embeds
+        if listener_label is not None:
+            listener_label = F.pad(listener_label, (system_embed_length, 0), value=-100)
+        if speaker_label is not None:
+            speaker_label = F.pad(speaker_label, (system_embed_length, 0), value=-100)
+
+        combined_embeds = torch.cat([system_embeds, speak_embeds + listen_embeds], dim=1)
+
+        # Pass through the language model
+        outputs = self.lm_model(
+            inputs_embeds=combined_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
 
-    def generate(self, input_ids, audio_feature=None, max_length=50):
+        last_hidden_state = outputs.last_hidden_state  # (batch_size, seq_len, hidden_size)
+
+        # Initialize loss and logits
+        total_loss = None
+        loss_fct = CrossEntropyLoss()
+
+        if listener_label is not None:
+            listener_logits = self.listener_head(last_hidden_state)
+            listener_logits, listener_label = align_logits_and_labels(listener_logits, listener_label)
+            listener_loss = loss_fct(listener_logits.view(-1, listener_logits.size(-1)), listener_label.view(-1))
+            total_loss = listener_loss
+
+        if speaker_label is not None:
+            decoded_logits = self.speaker_head(last_hidden_state)
+            logits, label = align_logits_and_labels(decoded_logits, speaker_label)
+            lm_loss = loss_fct(logits.view(-1, logits.size(-1)), label.view(-1))
+            total_loss = total_loss + lm_loss if total_loss is not None else lm_loss
+
+        # Iterate over each decoding head
+        if codec_label is not None:
+            for i, decoding_head in enumerate(self.linear_decoding_head):
+                if codec_label[i] is not None:
+                    decoded_logits = decoding_head(last_hidden_state)
+                    logits, label = align_logits_and_labels(decoded_logits, codec_label[i])
+                    codec_loss = loss_fct(logits.view(-1, logits.size(-1)), label.view(-1))
+                    total_loss = total_loss + codec_loss if total_loss is not None else codec_loss
+
+        if return_dict:
+            return CausalLMOutputWithPast(
+                loss=total_loss,
+                logits=decoded_logits,
+                hidden_states=outputs.hidden_states,
+                attentions=outputs.attentions,
+            )
+        else:
+            return (decoded_logits, total_loss) if total_loss is not None else decoded_logits
+
+    def generate(self, input_ids, input_values=None, listen_audio=None, speaker_emb=None, max_length=50):
         self.eval()
-        generated = input_ids.to(self.device)
-        begin_gen_pos = input_ids.shape[1]
+        generated = input_ids
+        begin_gen_pos = input_ids.size(1)
+
         with torch.no_grad():
             for _ in range(max_length):
-                outputs = self.forward(input_ids=generated, audio_features=audio_feature)
-                next_token_logits = outputs.logits[:, -1, :]
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
-                generated = torch.cat((generated, next_token), dim=-1)
+                outputs = self.forward(
+                    input_values=input_values,
+                    listen_audio=listen_audio,
+                    speaker_emb=speaker_emb,
+                    speaker_text=generated,
+                )
+                next_token_logits = outputs.logits[:, -1, :]  # (batch_size, vocab_size)
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # (batch_size, 1)
+                generated = torch.cat([generated, next_token], dim=-1)
                 if next_token.item() == self.tokenizer.eos_token_id:
                     break
-        return generated[:, begin_gen_pos:-1]
+        return generated[:, begin_gen_pos:]
