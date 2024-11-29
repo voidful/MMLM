@@ -3,6 +3,7 @@ from typing import Optional
 from pydub import AudioSegment
 import numpy as np
 import torch
+from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
 
@@ -29,6 +30,42 @@ class MMLMUtility():
                 'labels': pad_sequence([torch.tensor(i['label_ids']) for i in features], batch_first=True,
                                        padding_value=-100),
             }
+
+
+def prepare_labels(tokenizer, input_texts=None, label_texts=None):
+    """
+    Prepares input and label text for a tokenizer by adding BOS/EOS tokens
+    if not present and performing text shifting as required.
+
+    Args:
+        tokenizer: Tokenizer object used to process text.
+        input_text: Input text tensor or list (optional).
+        label_text: Label text tensor or list (optional).
+
+    Returns:
+        tuple: A tuple containing processed input_text and label_text.
+    """
+    # Add BOS/EOS tokens if not
+    input_texts = add_bos_eos_tokens_if_not_exist(tokenizer, input_texts)
+    label_texts = add_bos_eos_tokens_if_not_exist(tokenizer, label_texts)
+
+    # Perform text shifting
+    if label_texts is None and input_texts is not None:
+        label_texts = input_texts[:, 1:]  # Shift input_text to create label_text
+        input_texts = input_texts[:, :-1]  # Exclude last token from input_text
+    elif label_texts is not None and input_texts is None:
+        label_texts = label_texts[:, :-1]  # Exclude last token from label_text
+        input_texts = label_texts[:, 1:]  # Shift label_text to create input_text
+
+    return input_texts, label_texts
+
+
+def initialize_head_weight_from_lm(lm_embeddings_weight, lm_vocab_size, lm_embedding_dim, target_dim):
+    sampled_indices = torch.randint(0, lm_vocab_size, (target_dim,))
+    sampled_weights = lm_embeddings_weight[sampled_indices].clone().detach()
+    embedding_head = nn.Embedding(target_dim, lm_embedding_dim)
+    embedding_head.weight = nn.Parameter(sampled_weights)
+    return embedding_head
 
 
 def align_and_sum_embeddings(voice_embeds, text_embeds):
@@ -69,7 +106,9 @@ def add_bos_eos_tokens_if_not_exist(tokenizer, input_text: Optional[torch.LongTe
                     [sequence, torch.tensor([tokenizer.eos_token_id], dtype=torch.long, device=sequence.device)])
             processed_texts.append(sequence)
         input_text = torch.nn.utils.rnn.pad_sequence(processed_texts, batch_first=True, padding_value=padding_value)
-    return input_text
+        return input_text
+    else:
+        return None
 
 
 def load_audio_to_tensor(audio_input, sr=24000, selected_channel=None):

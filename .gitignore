@@ -173,6 +173,5 @@ train.py
 *.iml
 out
 gen
-train_asr_slurm.sh
-train_asr_slurm.py
 ds_config.json
+*_slurm*
