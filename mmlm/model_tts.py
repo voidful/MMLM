@@ -18,12 +18,12 @@ class MMLMTTSConfig(PretrainedConfig):
     model_type = "mmlmtts"
 
     def __init__(self, lm_model_name="voidful/SmolLM2-360M-Instruct-Whisper",
-                 num_heads=8, codebook_size=2048,
+                 num_heads=8, codebook_size=2051,
                  speaker_emb_dim=192, **kwargs):
         super().__init__(**kwargs)
         self.lm_model_name = lm_model_name
         self.num_heads = num_heads
-        self.codebook_size = codebook_size + 3
+        self.codebook_size = codebook_size
         self.speaker_emb_dim = speaker_emb_dim
 
 
@@ -110,7 +110,7 @@ class MMLMTTS(PreTrainedModel):
         system_embeds = self.embed_system_prompt(tts_text, speaker_emb)
         tts_label = F.pad(tts_label, (system_embeds.shape[1], 0), value=-100)
         outputs = self.lm_model.model(
-            inputs_embeds=torch.cat([system_embeds, inputs_embeds], dim=1),
+            inputs_embeds=torch.cat([system_embeds, inputs_embeds], dim=1).to(self.lm_model.dtype),
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,

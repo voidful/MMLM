@@ -80,7 +80,7 @@ class MMLMASR(PreTrainedModel):
         inputs_embeds = align_and_sum_embeddings(audio_embeds, text_embeds)
         system_embeds = self.embed_system_prompt()
         outputs = self.lm_model(
-            inputs_embeds=torch.cat([system_embeds, inputs_embeds], dim=1),
+            inputs_embeds=torch.cat([system_embeds, inputs_embeds], dim=1).to(self.lm_model.dtype),
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
