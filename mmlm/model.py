@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from mmlm.common import initialize_language_model
+from mmlm.common import initialize_language_model, FocalLoss
 from mmlm.utility import align_and_sum_embeddings, align_logits_and_labels, prepare_labels, \
     initialize_head_weight_from_lm
 
@@ -145,7 +145,7 @@ class MMLM(PreTrainedModel):
 
     def _compute_loss_and_output(self, outputs, asr_labels, tts_label, codec_label):
         total_loss = 0.0
-        loss_fct = CrossEntropyLoss()
+        loss_fct = FocalLoss()
 
         decoded_logits = self.tts_head(outputs.last_hidden_state)
         logits, labels = align_logits_and_labels(decoded_logits, tts_label)
@@ -159,7 +159,7 @@ class MMLM(PreTrainedModel):
             if codec_label and codec_label[i] is not None:
                 head_logits = decoding_head(outputs.last_hidden_state)
                 logits, labels = align_logits_and_labels(head_logits, codec_label[i])
-                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1))
+                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1)) * 1/i
 
         return CausalLMOutputWithPast(
             loss=total_loss,

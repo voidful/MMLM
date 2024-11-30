@@ -3,7 +3,6 @@ import logging
 import torch
 from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
-from sklearn.model_selection import train_test_split
 import wandb
 from datasets import load_dataset
 from mmlm.model_tts import MMLMTTSConfig, MMLMTTS
@@ -22,7 +21,7 @@ TRAIN_TEST_SPLIT_RATIO = 0.1
 EPOCHS = 5
 BATCH_SIZE = 1
 LEARNING_RATE = 5e-5
-GRADIENT_ACCUMULATION_STEPS = 4
+GRADIENT_ACCUMULATION_STEPS = 50
 USE_BF16 = True
 USE_FP16 = False
 LOGGING_STEPS = 10
@@ -140,9 +139,9 @@ def main():
     logger.info(f"Filtered dataset to {len(data)} samples.")
 
     # Split dataset
-    train_data, eval_data = train_test_split(data, test_size=TRAIN_TEST_SPLIT_RATIO, random_state=42)
-    train_dataset = CustomDataset(train_data, tokenizer)
-    eval_dataset = CustomDataset(eval_data, tokenizer)
+    data = data.train_test_split(test_size=TRAIN_TEST_SPLIT_RATIO, seed=42)
+    train_dataset = CustomDataset(data['train'], tokenizer)
+    eval_dataset = CustomDataset(data['test'], tokenizer)
 
     # Data collator
     data_collator = CustomDataCollator(tokenizer.pad_token_id)

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from mmlm.common import initialize_language_model
+from mmlm.common import initialize_language_model, FocalLoss
 from mmlm.utility import align_and_sum_embeddings, align_logits_and_labels, prepare_labels, \
     initialize_head_weight_from_lm
 
@@ -71,7 +71,7 @@ class MMLMTTS(PreTrainedModel):
     def embed_system_prompt(self, synthesis_text_ids, speaker_emb):
         # Prepare the template and tokenize components
         template = self.tokenizer.apply_chat_template(
-            [{"role": "system", "content": "Synth [SYN_TEXT] with reference speech [REFSPEECH]"}],
+            [{"role": "system", "content": "Synth [SYN_TEXT] with reference speech <begin_of_speech>[REFSPEECH]<end_of_speech>."}],
             tokenize=False,
             add_generation_prompt=False,
         )
@@ -122,14 +122,14 @@ class MMLMTTS(PreTrainedModel):
         total_loss = 0.0
         decoded_logits = self.lm_head(outputs.last_hidden_state)
         logits, labels = align_logits_and_labels(decoded_logits, text_label)
-        loss_fct = CrossEntropyLoss()
+        loss_fct = FocalLoss()
         total_loss += loss_fct(decoded_logits.view(-1, logits.size(-1)), labels.view(-1))
 
         for i, decoding_head in enumerate(self.tts_decoding_head):
             if codec_label and codec_label[i] is not None:
                 head_logits = decoding_head(outputs.last_hidden_state)
                 logits, labels = align_logits_and_labels(head_logits, codec_label[i])
-                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1))
+                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1)) * 1/i
 
         return CausalLMOutputWithPast(
             loss=total_loss,

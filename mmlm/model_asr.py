@@ -1,6 +1,6 @@
 import os
 
-from mmlm.common import initialize_language_model
+from mmlm.common import initialize_language_model, FocalLoss
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from typing import Optional, Union, Tuple
@@ -46,7 +46,8 @@ class MMLMASR(PreTrainedModel):
         adapted_features = self.adapter(features.permute(0, 2, 1))
         return adapted_features
 
-    def embed_system_prompt(self, prompt_text: str = "you are a helpful asr model"):
+    def embed_system_prompt(self,
+                            prompt_text: str = "you are a helpful asr model, please help me to understand the audio.") -> torch.Tensor:
         template = self.tokenizer.apply_chat_template(
             [{"role": "system", "content": f"{prompt_text}"}],
             tokenize=True,
@@ -107,7 +108,7 @@ class MMLMASR(PreTrainedModel):
         elif labels_len > logits_len:
             labels = labels[:, :logits_len]
 
-        loss_fct = CrossEntropyLoss()
+        loss_fct = FocalLoss()
         shift_logits = logits.reshape(-1, logits.size(-1))
         shift_labels = labels.reshape(-1)
         return loss_fct(shift_logits, shift_labels)
