@@ -157,6 +157,7 @@ def main():
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
+        eval_accumulation_steps=10,
         learning_rate=LEARNING_RATE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         bf16=USE_BF16,
