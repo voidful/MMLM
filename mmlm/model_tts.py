@@ -71,7 +71,8 @@ class MMLMTTS(PreTrainedModel):
     def embed_system_prompt(self, synthesis_text_ids, speaker_emb):
         # Prepare the template and tokenize components
         template = self.tokenizer.apply_chat_template(
-            [{"role": "system", "content": "Synth [SYN_TEXT] with reference speech <begin_of_speech>[REFSPEECH]<end_of_speech>."}],
+            [{"role": "system",
+              "content": "Synth [SYN_TEXT] with reference speech <begin_of_speech>[REFSPEECH]<end_of_speech>."}],
             tokenize=False,
             add_generation_prompt=False,
         )
@@ -116,12 +117,10 @@ class MMLMTTS(PreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-        return self._compute_loss_and_output(outputs, tts_label, codec_label)
 
-    def _compute_loss_and_output(self, outputs, text_label, codec_label):
         total_loss = 0.0
         decoded_logits = self.lm_head(outputs.last_hidden_state)
-        logits, labels = align_logits_and_labels(decoded_logits, text_label)
+        logits, labels = align_logits_and_labels(decoded_logits, tts_label)
         loss_fct = FocalLoss()
         total_loss += loss_fct(decoded_logits.view(-1, logits.size(-1)), labels.view(-1))
 
@@ -129,11 +128,11 @@ class MMLMTTS(PreTrainedModel):
             if codec_label and codec_label[i] is not None:
                 head_logits = decoding_head(outputs.last_hidden_state)
                 logits, labels = align_logits_and_labels(head_logits, codec_label[i])
-                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1)) * 1/i
+                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1)) * 1 / i
 
         return CausalLMOutputWithPast(
             loss=total_loss,
-            logits=decoded_logits,
+            logits=outputs.last_hidden_state,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )

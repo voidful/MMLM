@@ -167,6 +167,7 @@ def main():
         load_best_model_at_end=False,
         gradient_checkpointing=GRADIENT_CHECKPOINTING,
         label_names=["asr_labels"],
+        prediction_loss_only=True,
     )
 
     # Initialize Trainer

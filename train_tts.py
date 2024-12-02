@@ -166,6 +166,7 @@ def main():
         load_best_model_at_end=False,
         gradient_checkpointing=GRADIENT_CHECKPOINTING,
         label_names=["tts_label", "codec_label"],
+        prediction_loss_only=True,
     )
 
     # Initialize Trainer
