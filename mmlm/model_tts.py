@@ -4,7 +4,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 from typing import Optional, Union, List
 import torch
 from torch import nn
-from torch.nn import CrossEntropyLoss
 import torch.nn.functional as F
 from transformers import PreTrainedModel, PretrainedConfig
 from transformers.modeling_outputs import CausalLMOutputWithPast
@@ -18,7 +17,7 @@ class MMLMTTSConfig(PretrainedConfig):
     model_type = "mmlmtts"
 
     def __init__(self, lm_model_name="voidful/SmolLM2-360M-Instruct-Whisper",
-                 num_heads=8, codebook_size=2051,
+                 num_heads=8, codebook_size=2048,
                  speaker_emb_dim=192, **kwargs):
         super().__init__(**kwargs)
         self.lm_model_name = lm_model_name
@@ -45,8 +44,10 @@ class MMLMTTS(PreTrainedModel):
         vocab_size, embedding_dim = lm_embeddings.size()
 
         self.codec_decoding_head = nn.ModuleList([
-            initialize_head_weight_from_lm(lm_embeddings, vocab_size, embedding_dim, self.config.codebook_size)
-            for _ in range(self.num_heads)
+            (initialize_head_weight_from_lm(lm_embeddings, vocab_size, embedding_dim, self.config.codebook_size)
+             if head_num > 0 else
+             initialize_head_weight_from_lm(lm_embeddings, vocab_size, embedding_dim, self.config.codebook_size + 3))
+            for head_num in range(self.num_heads)
         ])
         self.tts_decoding_head = nn.ModuleList([
             nn.Linear(embedding_dim, self.config.codebook_size, bias=False) for _ in range(self.num_heads)
@@ -83,8 +84,7 @@ class MMLMTTS(PreTrainedModel):
 
         # Generate embeddings
         speaker_emb = self.speaker_adapter(speaker_emb)
-        synthesis_text_emb = self.embed_text(synthesis_text_ids).squeeze()
-
+        synthesis_text_emb = self.embed_text(synthesis_text_ids)[0]
         # Concatenate embeddings and return
         return torch.cat(
             [self.embed_text(tokens[0]), synthesis_text_emb, self.embed_text(tokens[1]), speaker_emb,
@@ -96,20 +96,23 @@ class MMLMTTS(PreTrainedModel):
             input_values: Optional[List[torch.LongTensor]] = None,
             speaker_emb: Optional[torch.LongTensor] = None,
             tts_text: Optional[torch.LongTensor] = None,
-            tts_label: Optional[torch.LongTensor] = None,
+            tts_text_with_pad: Optional[torch.LongTensor] = None,
+            tts_label_with_pad: Optional[torch.LongTensor] = None,
             codec_label: Optional[List[torch.LongTensor]] = None,
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
     ) -> Union[torch.Tensor, CausalLMOutputWithPast]:
-        tts_text, tts_label = prepare_labels(self.tokenizer, tts_text, tts_label)
-
+        tts_text_with_pad, tts_label_with_pad = prepare_labels(self.tokenizer, tts_text_with_pad, tts_label_with_pad)
         mimi_embeds = self.embed_audio(input_values)
-        text_embeds = self.embed_text(tts_text)
+        text_embeds = self.embed_text(tts_text_with_pad)
         inputs_embeds = align_and_sum_embeddings(mimi_embeds, text_embeds)
         system_embeds = self.embed_system_prompt(tts_text, speaker_emb)
-        tts_label = F.pad(tts_label, (system_embeds.shape[1], 0), value=-100)
+        if codec_label is not None:
+            codec_label = F.pad(codec_label, (system_embeds.shape[1], 0), value=-100)
+        if tts_label_with_pad is not None:
+            tts_label_with_pad = F.pad(tts_label_with_pad, (system_embeds.shape[1], 0), value=-100)
         outputs = self.lm_model.model(
             inputs_embeds=torch.cat([system_embeds, inputs_embeds], dim=1).to(self.lm_model.dtype),
             use_cache=use_cache,
@@ -120,15 +123,14 @@ class MMLMTTS(PreTrainedModel):
 
         total_loss = 0.0
         decoded_logits = self.lm_head(outputs.last_hidden_state)
-        logits, labels = align_logits_and_labels(decoded_logits, tts_label)
+        logits, labels = align_logits_and_labels(decoded_logits, tts_label_with_pad)
         loss_fct = FocalLoss()
         total_loss += loss_fct(decoded_logits.view(-1, logits.size(-1)), labels.view(-1))
-
         for i, decoding_head in enumerate(self.tts_decoding_head):
-            if codec_label and codec_label[i] is not None:
+            if codec_label is not None and codec_label[i] is not None:
                 head_logits = decoding_head(outputs.last_hidden_state)
-                logits, labels = align_logits_and_labels(head_logits, codec_label[i])
-                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1)) * 1 / i
+                logits, labels = align_logits_and_labels(head_logits, codec_label[i,:].unsqueeze(0))
+                total_loss += loss_fct(head_logits.view(-1, logits.size(-1)), labels.view(-1))
 
         return CausalLMOutputWithPast(
             loss=total_loss,
@@ -142,3 +144,29 @@ class MMLMTTS(PreTrainedModel):
 
     def gradient_checkpointing_disable(self):
         self.lm_model.gradient_checkpointing_disable()
+
+    def stream_generate(self, speaker_emb, tts_text, max_length=50):
+        text_sequence = [self.tokenizer.bos_token_id]
+        audio_sequences = {i: [0] for i in range(0, len(self.tts_decoding_head))}
+        tts_text = self.tokenizer(tts_text, return_tensors='pt')['input_ids'].to("cuda")
+        self.eval()
+        with torch.no_grad():
+            for step in range(max_length):
+                input_values = torch.tensor([[audio_sequences[i]] for i in audio_sequences]).to(torch.long).to("cuda")
+                tts_text_with_pad = torch.tensor([text_sequence]).to(torch.long).to("cuda")
+                outputs = self.forward(input_values=input_values, speaker_emb=speaker_emb,
+                                       tts_text=tts_text,
+                                       tts_text_with_pad=tts_text_with_pad,
+                                       tts_label_with_pad=tts_text_with_pad)
+                next_token = torch.argmax(self.lm_head(outputs.logits)[:, -1, :], dim=-1).item()
+                text_sequence.append(next_token)
+                for head_idx in audio_sequences:
+                    head_logits = self.tts_decoding_head[head_idx](outputs.logits.to(torch.float))
+                    next_audio_unit = torch.argmax(head_logits[:, -1, :], dim=-1).item()
+                    audio_sequences[head_idx].append(next_audio_unit)
+                if next_token == self.tokenizer.bos_token_id or audio_sequences[0][-1] > 2048:
+                    break
+
+        audio_sequences = [audio_sequences[i] for i in range(0, len(audio_sequences))]
+        real_audio = [[audio_sequences[0][:-1]] + [seq[1:] for seq in audio_sequences[1:]]]
+        return real_audio,self.tokenizer.decode(text_sequence)

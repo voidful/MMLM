@@ -5,7 +5,8 @@ from torch.utils.data import Dataset
 from transformers import Trainer, TrainingArguments
 import wandb
 from datasets import load_dataset
-from mmlm.model_tts import MMLMTTSConfig, MMLMTTS
+from mmlm.model import MMLMConfig, MMLM
+from mmlm.utility import load_audio_to_tensor
 import numpy as np
 
 # ========================
@@ -13,18 +14,18 @@ import numpy as np
 # ========================
 WANDB_PROJECT_NAME = "mmlm-conv"
 WANDB_API_KEY = os.environ.get("WANDB_API_KEY")
-DATASET = load_dataset("voidful/conv_test_data")['train']
+DATASET = load_dataset("voidful/mmlm_test")['train']
 LM_MODEL_NAME = "voidful/SmolLM2-360M-Instruct-Whisper"
 OUTPUT_DIR = "./mmlm-conv-training"
 MODEL_SAVE_PATH = "./mmlm-conv-model"
 TRAIN_TEST_SPLIT_RATIO = 0.1
-EPOCHS = 5
+EPOCHS = 500
 BATCH_SIZE = 1
-LEARNING_RATE = 5e-5
+LEARNING_RATE = 1e-3
 GRADIENT_ACCUMULATION_STEPS = 50
 USE_BF16 = True
 USE_FP16 = False
-LOGGING_STEPS = 10
+LOGGING_STEPS = 1
 SAVE_TOTAL_LIMIT = 3
 GRADIENT_CHECKPOINTING = True
 PAD_VALUE = 0.0
@@ -60,13 +61,18 @@ class CustomDataset(Dataset):
 
     def __getitem__(self, idx):
         entry = self.data
-        audio_unit = np.array(entry["unit"][idx])
-        x_vector = entry["x-vector"][idx]
-        text_with_pad = entry["text_with_pad"][idx]
+        audio_path = entry[idx]["user_audio_path"]
+        audio_tensor = load_audio_to_tensor(audio_path)[0]
+        audio_unit = np.array(entry[idx]["machine_unit"])
+        x_vector = entry[idx]["x-vector"]
+        text_with_pad = entry[idx]["text_with_pad"]
 
-        padding_token = 2048
-        bos_token_id = 2049  # Start of Sequence token ID
-        eos_token_id = 2030  # End of Sequence token ID
+        user_text_with_pad = text_with_pad[0]
+        machine_text_with_pad = text_with_pad[1]
+
+        padding_token = 0
+        bos_token_id = 0
+        eos_token_id = 0
 
         audio_unit = np.hstack((audio_unit, np.zeros((audio_unit.shape[0], 1), dtype=int)))
         for i in range(1, audio_unit.shape[0]):
@@ -78,12 +84,16 @@ class CustomDataset(Dataset):
         input_audio_unit = matrix_with_bos_eos[:, :-1]
         target_audio_unit = matrix_with_bos_eos[:, 1:]
 
+
         return {
-            "input_values": torch.tensor(input_audio_unit),
-            "codec_label": torch.tensor(target_audio_unit),
-            "speaker_emb": torch.tensor(x_vector),
-            "tts_text": self.tokenizer(text_with_pad, add_special_tokens=False, return_tensors="pt")[
-                "input_ids"].squeeze(0)
+            "input_values": torch.tensor(audio_tensor),
+            "speaker_codecs": torch.tensor(input_audio_unit),
+            "speaker_codec_labels": torch.tensor(target_audio_unit),
+            "speaker_embs": torch.tensor(x_vector[1]),
+            "speaker_texts": self.tokenizer(machine_text_with_pad, add_special_tokens=False, return_tensors="pt")[
+                "input_ids"],
+            "listener_texts": self.tokenizer(user_text_with_pad, add_special_tokens=False, return_tensors="pt")[
+                "input_ids"],
         }
 
 
@@ -95,21 +105,13 @@ class CustomDataCollator:
         self.audio_pad_value = audio_pad_value
 
     def __call__(self, batch):
-        # input_values = torch.nn.utils.rnn.pad_sequence(
-        #     [item["input_values"] for item in batch],
-        #     batch_first=True,
-        #     padding_value=self.audio_pad_value
-        # )
-        # labels = torch.nn.utils.rnn.pad_sequence(
-        #     [item["tts_texts"] for item in batch],
-        #     batch_first=True,
-        #     padding_value=self.text_pad_value
-        # )
         return {
             "input_values": torch.cat([item["input_values"] for item in batch]),
-            "speaker_emb": torch.cat([item["speaker_emb"] for item in batch]),
-            "tts_text": torch.cat([item["tts_text"] for item in batch]),
-            "asr_texts": torch.cat([item["asr_texts"] for item in batch]),
+            "speaker_codecs": torch.cat([item["speaker_codecs"] for item in batch]),
+            "speaker_codec_labels": torch.cat([item["speaker_codec_labels"] for item in batch]),
+            "speaker_embs": torch.cat([item["speaker_embs"] for item in batch]),
+            "speaker_texts": torch.cat([item["speaker_texts"] for item in batch]),
+            "listener_texts": torch.cat([item["listener_texts"] for item in batch]),
         }
 
 
@@ -127,15 +129,19 @@ def main():
         initialize_wandb()
 
     # Load model and tokenizer
-    config = MMLMTTSConfig(lm_model_name=LM_MODEL_NAME)
-    model = MMLMTTS(config)
+    config = MMLMConfig(lm_model_name=LM_MODEL_NAME)
+    model = MMLM(config)
     tokenizer = model.tokenizer
     logger.info("Model and tokenizer loaded.")
+
+    # data = DATASET
+    # train_dataset = CustomDataset(data.select([46]), tokenizer)
+    # eval_dataset = CustomDataset(data.select([46]), tokenizer)
 
     # Load dataset
     data = DATASET
     logger.info(f"Loaded {len(data)} samples from dataset.")
-    data = data.filter(lambda x: len(x["unit"]) <= MAX_LENGTH)
+    data = data.filter(lambda x: len(x["machine_unit"]) <= MAX_LENGTH)
     logger.info(f"Filtered dataset to {len(data)} samples.")
 
     # Split dataset
@@ -157,7 +163,6 @@ def main():
         num_train_epochs=EPOCHS,
         per_device_train_batch_size=BATCH_SIZE,
         per_device_eval_batch_size=BATCH_SIZE,
-        eval_accumulation_steps=1,
         learning_rate=LEARNING_RATE,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         bf16=USE_BF16,
@@ -166,8 +171,9 @@ def main():
         run_name=f"{WANDB_PROJECT_NAME}-training",
         load_best_model_at_end=False,
         gradient_checkpointing=GRADIENT_CHECKPOINTING,
-        label_names=["tts_label", "codec_label"],
+        label_names=["listener_text_labels", "speaker_text_labels"],
         prediction_loss_only=True,
+        remove_unused_columns=False,
     )
 
     # Initialize Trainer

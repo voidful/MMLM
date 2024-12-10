@@ -45,9 +45,10 @@ def prepare_labels(tokenizer, input_texts=None, label_texts=None):
     Returns:
         tuple: A tuple containing processed input_text and label_text.
     """
-    # Add BOS/EOS tokens if not
-    input_texts = add_bos_eos_tokens_if_not_exist(tokenizer, input_texts)
-    label_texts = add_bos_eos_tokens_if_not_exist(tokenizer, label_texts)
+    if input_texts is None or label_texts is None:
+        # Add BOS/EOS tokens if not
+        input_texts = add_bos_eos_tokens_if_not_exist(tokenizer, input_texts)
+        label_texts = add_bos_eos_tokens_if_not_exist(tokenizer, label_texts)
 
     # Perform text shifting
     if label_texts is None and input_texts is not None:

@@ -62,11 +62,12 @@ class CustomDataset(Dataset):
         entry = self.data
         audio_unit = np.array(entry[idx]["unit"])
         x_vector = entry[idx]["x-vector"]
+        text = entry[idx]["text"]
         text_with_pad = entry[idx]["text_with_pad"]
 
-        padding_token = 2048
-        bos_token_id = 2049  # Start of Sequence token ID
-        eos_token_id = 2030  # End of Sequence token ID
+        padding_token = 0
+        bos_token_id = 0  # Start of Sequence token ID
+        eos_token_id = 0  # End of Sequence token ID
 
         audio_unit = np.hstack((audio_unit, np.zeros((audio_unit.shape[0], 1), dtype=int)))
         for i in range(1, audio_unit.shape[0]):
@@ -82,8 +83,9 @@ class CustomDataset(Dataset):
             "input_values": torch.tensor(input_audio_unit),
             "codec_label": torch.tensor(target_audio_unit),
             "speaker_emb": torch.tensor(x_vector),
-            "tts_text": self.tokenizer(text_with_pad, add_special_tokens=False, return_tensors="pt")[
-                "input_ids"].squeeze(0)
+            "tts_text_with_pad": self.tokenizer(text_with_pad, add_special_tokens=False, return_tensors="pt")[
+                "input_ids"].squeeze(0),
+            "tts_text": self.tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"].squeeze(0)
         }
 
 
@@ -95,19 +97,11 @@ class CustomDataCollator:
         self.audio_pad_value = audio_pad_value
 
     def __call__(self, batch):
-        # input_values = torch.nn.utils.rnn.pad_sequence(
-        #     [item["input_values"] for item in batch],
-        #     batch_first=True,
-        #     padding_value=self.audio_pad_value
-        # )
-        # labels = torch.nn.utils.rnn.pad_sequence(
-        #     [item["tts_texts"] for item in batch],
-        #     batch_first=True,
-        #     padding_value=self.text_pad_value
-        # )
         return {
             "input_values": torch.cat([item["input_values"] for item in batch]),
+            "codec_label": torch.cat([item["codec_label"] for item in batch]),
             "speaker_emb": torch.cat([item["speaker_emb"] for item in batch]),
+            "tts_text_with_pad": torch.cat([item["tts_text_with_pad"] for item in batch]),
             "tts_text": torch.cat([item["tts_text"] for item in batch]),
         }
 

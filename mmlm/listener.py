@@ -46,9 +46,6 @@ class ListenFeatureExtractor(nn.Module):
 
         layer_outputs = torch.stack(self.layer_outputs, dim=0)  # Shape: (num_layers, batch, seq_length, hidden_dim)
 
-        # Apply layer norm to each layer's output
-        layer_outputs = F.layer_norm(layer_outputs, layer_outputs.size()[2:])
-
         # Compute weights and perform weighted sum
         weights = F.softmax(self.layer_weights, dim=0)
         weighted_sum = torch.sum(weights[:, None, None, None] * layer_outputs,
@@ -56,5 +53,4 @@ class ListenFeatureExtractor(nn.Module):
 
         # Apply layer norm to the final weighted sum
         weighted_sum = weighted_sum.transpose(1, 2)
-        weighted_sum = F.layer_norm(weighted_sum, weighted_sum.size()[1:])
         return weighted_sum

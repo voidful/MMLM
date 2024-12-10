@@ -65,7 +65,7 @@ class CustomDataset(Dataset):
         text = entry["text_with_pad"]
 
         # Load and preprocess audio
-        audio_tensor = load_audio_to_tensor(audio_path).squeeze()
+        audio_tensor = load_audio_to_tensor(audio_path)[0]
         if audio_tensor.nelement() == 0:
             raise ValueError(f"Empty audio tensor at index {idx}")
 
